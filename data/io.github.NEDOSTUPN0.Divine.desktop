@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Divine
+GenericName=Game Launcher
+Comment=Play your Epic Games library on Linux
+Exec=divine
+Icon=io.github.NEDOSTUPN0.Divine
+Terminal=false
+Categories=Game;
+Keywords=epic;games;launcher;proton;legendary;
+StartupNotify=true
+# Started over D-Bus, so clicking a notification after Divine has quit brings
+# it back rather than doing nothing. Needs the service file package.nix installs.
+DBusActivatable=true
+# Divine tells the desktop when a download or a game has finished, and this is
+# what puts it in Settings under Notifications.
+X-GNOME-UsesNotifications=true

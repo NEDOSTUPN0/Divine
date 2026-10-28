@@ -1,0 +1,86 @@
+# Maintainer: NEDOSTUPN0 <v.ya.1910@gmail.com>
+
+# "divine" is taken in the AUR by the DiVinE model checker, which also
+# installs /usr/bin/divine.
+pkgname=divine-launcher
+_name=Divine
+_appid=io.github.NEDOSTUPN0.Divine
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Native GTK4 launcher for Epic Games, powered by Legendary'
+# 64-bit only: the Epic Games Launcher wrapper is a 64-bit Windows binary.
+arch=('x86_64')
+url='https://github.com/NEDOSTUPN0/Divine'
+license=('GPL-3.0-or-later')
+depends=(
+  'cairo'
+  'glib2'
+  'glibc'
+  'gtk4'
+  'hicolor-icon-theme'
+  'libadwaita'
+  'libgcc'
+  'pango'
+  # Trailers: playbin3 decodes, gtk4paintablesink draws into the window.
+  'gst-libav'
+  'gst-plugin-gtk4'
+  'gst-plugins-base'
+  'gst-plugins-good'
+  'gstreamer'
+  # Looked up on PATH at run time.
+  'legendary'
+  'umu-launcher'
+)
+makedepends=('cargo' 'mingw-w64-gcc')
+optdepends=(
+  'gamemode: the GameMode switch'
+  'mangohud: the MangoHud switch'
+)
+conflicts=('divine')
+# makepkg's LTO drops the hand-written assembly ring links in, and the build
+# dies on undefined ring_core_* symbols. Cargo does thin LTO itself, and
+# strips the binary, which leaves a debug package nothing to hold.
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$_name-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_name-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+
+  # The same two steps as nix/epic-shim.nix: -municode on the link step only,
+  # or SetEnvironmentVariable turns wide and stops clearing SteamAppId.
+  cd vendor/heroic-epic-integration
+  x86_64-w64-mingw32-gcc -O2 -c -o main.o main.c
+  x86_64-w64-mingw32-gcc -municode -o EpicGamesLauncher.exe main.o -lshell32
+}
+
+check() {
+  cd "$_name-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen
+}
+
+package() {
+  cd "$_name-$pkgver"
+  install -Dm755 target/release/divine -t "$pkgdir/usr/bin"
+
+  install -Dm644 "data/$_appid.desktop" -t "$pkgdir/usr/share/applications"
+  install -Dm644 "data/$_appid.service" -t "$pkgdir/usr/share/dbus-1/services"
+  sed -i 's|@bindir@|/usr/bin|' "$pkgdir/usr/share/dbus-1/services/$_appid.service"
+  cp -r data/icons "$pkgdir/usr/share/icons"
+
+  # Found through XDG_DATA_DIRS and copied into each game's prefix.
+  install -Dm644 vendor/heroic-epic-integration/EpicGamesLauncher.exe \
+    -t "$pkgdir/usr/share/divine"
+  install -Dm644 vendor/heroic-epic-integration/LICENSE \
+    "$pkgdir/usr/share/licenses/$pkgname/heroic-epic-integration"
+}

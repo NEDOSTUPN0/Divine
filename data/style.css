@@ -1,0 +1,116 @@
+/* The default flow box child carries 3px of padding, which is 6px of dead space
+   per column: enough to cost a whole column on a wide window. The tiles bring
+   their own spacing, so it goes. */
+.library-grid > flowboxchild {
+  padding: 0;
+}
+
+/* No background or corner radius here: the tile carries libadwaita's own .card
+   class, so it takes the theme's card colour, radius and shadow and looks like
+   every other card in the app. .game-card is only a handle for the rules below. */
+
+/* Sits under the cover inside the card's rounded clip, so the two read as one
+   element while the title stays legible over any artwork. */
+.card-title-bar {
+  background-color: alpha(currentColor, 0.12);
+  padding: 4px 8px;
+}
+
+.card-title {
+  font-size: 1em;
+}
+
+/* Games that are not installed sit under a grey copy of their own cover, and
+   hovering fades the colour one in over it. The fade is an AdwTimedAnimation
+   rather than a CSS transition: a user gtk.css can set `transition-property`
+   globally at a priority above ours, which would silence the transition. The
+   extra specificity keeps the hover rule below from lifting the grey. */
+.game-card picture.cover-grey {
+  filter: grayscale(100%);
+}
+
+.game-card:not(.uninstalled):hover picture {
+  filter: brightness(1.1);
+}
+
+/* An icon rather than a word, and for the same reason as the ProtonDB dot: a
+   user gtk.css can force `label { color: ... }` at a priority above ours, which
+   left the old text badge unreadable on its accent background. */
+.installed-badge {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+  border-radius: 999px;
+  padding: 5px;
+  margin: 6px;
+}
+
+.hero-cover {
+  border-radius: 12px;
+}
+
+/* Facts under the game title, as small cards. */
+.info-band {
+  padding: 6px;
+}
+
+.info-band separator {
+  margin: 6px 0;
+}
+
+.info-tile {
+  padding: 9px 14px;
+  min-width: 76px;
+}
+
+/* ProtonDB tiers, in the colours the site itself uses. The tier is a drawn dot
+   rather than coloured text: a user gtk.css can set `label { color: ... }` at a
+   priority above ours, and it would win. Backgrounds are ours to keep. */
+.protondb-dot {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 999px;
+  background-color: alpha(currentColor, 0.4);
+}
+
+.protondb-platinum { background-color: #b4c7dc; }
+.protondb-gold { background-color: #cfb53b; }
+.protondb-silver { background-color: #a6a6a6; }
+.protondb-bronze { background-color: #cd7f32; }
+.protondb-borked { background-color: #ff4b4b; }
+
+/* Store tags. Only the background is set: a user stylesheet at PRIORITY_USER
+   beats anything we say about label colour, and would win here too. */
+.tag-chip {
+  background-color: alpha(currentColor, 0.1);
+  border-radius: 9999px;
+  padding: 3px 12px;
+}
+
+/* The room held for a game's pictures while the store is still being asked.
+   Dimmer than a card that holds something, so it reads as space rather than as
+   an element that failed to draw. */
+.shots-placeholder {
+  background-color: alpha(currentColor, 0.05);
+}
+
+/* The button over a trailer's opening frame. Bigger than the arrows beside it:
+   it is what the carousel is offering, not a way to step past it. */
+.trailer-play {
+  padding: 12px;
+}
+
+/* The bar along the bottom of a trailer. Rounded and inset, so it reads as
+   something laid over the picture rather than a strip cut out of it. */
+.trailer-bar {
+  border-radius: 12px;
+  padding: 3px 6px;
+}
+
+/* Read by the log page, which cannot use these classes directly: a GtkTextTag
+   takes a colour, not a style class, so the theme's own has to be read off a
+   widget carrying one. Boxes rather than labels, for the same reason as the
+   ProtonDB dot — a user gtk.css can set `label { color: ... }` at a priority
+   above ours and would answer every one of these with the same colour. */
+box.log-debug { color: alpha(currentColor, 0.55); }
+box.log-warning { color: @warning_color; }
+box.log-error { color: @error_color; }
