@@ -1,0 +1,42 @@
+# Maintainer: NEDOSTUPN0 <v.ya.1910@gmail.com>
+
+# The files packaging/arch builds, taken from the release instead of compiled
+# here: .github/workflows/release.yml builds them on Arch for every tag.
+pkgname=divine-launcher-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Native GTK4 launcher for Epic Games, powered by Legendary (prebuilt)'
+arch=('x86_64')
+url='https://github.com/NEDOSTUPN0/Divine'
+license=('GPL-3.0-or-later' 'MIT')
+depends=(
+  'cairo'
+  'glib2'
+  'glibc'
+  'gtk4'
+  'hicolor-icon-theme'
+  'libadwaita'
+  'libgcc'
+  'pango'
+  'gst-libav'
+  'gst-plugin-gtk4'
+  'gst-plugins-base'
+  'gst-plugins-good'
+  'gstreamer'
+  'legendary'
+  'umu-launcher'
+)
+optdepends=(
+  'gamemode: the GameMode switch'
+  'mangohud: the MangoHud switch'
+)
+provides=('divine-launcher')
+conflicts=('divine-launcher' 'divine')
+options=('!strip' '!debug')
+source=("$url/releases/download/v$pkgver/divine-$pkgver-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cp -a usr "$pkgdir/"
+  mv "$pkgdir/usr/share/licenses/divine-launcher" "$pkgdir/usr/share/licenses/$pkgname"
+}

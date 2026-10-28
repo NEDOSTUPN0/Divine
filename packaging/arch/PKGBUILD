@@ -11,7 +11,7 @@ pkgdesc='Native GTK4 launcher for Epic Games, powered by Legendary'
 # 64-bit only: the Epic Games Launcher wrapper is a 64-bit Windows binary.
 arch=('x86_64')
 url='https://github.com/NEDOSTUPN0/Divine'
-license=('GPL-3.0-or-later')
+license=('GPL-3.0-or-later' 'MIT')
 depends=(
   'cairo'
   'glib2'

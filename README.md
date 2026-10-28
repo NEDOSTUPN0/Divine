@@ -94,10 +94,14 @@ The boring half, which is most of what you actually use:
 ```
 git clone https://github.com/NEDOSTUPN0/Divine
 cd Divine/packaging/arch
-makepkg -si
+makepkg -sir
 ```
 
-It needs `legendary`, which is in the AUR, so install that first, and
+`-r` removes what only the build needed, Rust and a Windows cross compiler,
+once it is done. To skip compiling altogether, run the same from
+`packaging/arch-bin` instead, which installs the build attached to the release.
+
+Either way it needs `legendary`, which is in the AUR, so install that first, and
 `umu-launcher` from multilib, so multilib has to be enabled in
 `/etc/pacman.conf`. If you have Steam, it already is.
 

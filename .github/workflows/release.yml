@@ -1,0 +1,68 @@
+# Builds the Arch package from packaging/arch for a release tag and attaches
+# its files to the release as a plain archive, which is what
+# packaging/arch-bin installs. Built on Arch itself: a Nix build links against
+# /nix/store and would not start anywhere else.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, such as v1.0.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Install the build tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git github-cli \
+            cargo mingw-w64-gcc gtk4 libadwaita \
+            gstreamer gst-plugins-base gst-plugins-good gst-plugin-gtk4 gst-libav
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      # The PKGBUILD downloads the tarball for its own pkgver, so a tag it does
+      # not match would quietly package some other release.
+      - name: Check the PKGBUILD names this release
+        run: |
+          grep -qx "pkgver=${TAG#v}" packaging/arch/PKGBUILD \
+            || { echo "packaging/arch/PKGBUILD is not at ${TAG#v}"; exit 1; }
+
+      # makepkg will not run as root. --nodeps because legendary is in the AUR
+      # and only needed at run time; everything the build needs is above.
+      - name: Build the package
+        run: |
+          useradd -m builder
+          cp -r packaging/arch /home/builder/build
+          chown -R builder /home/builder/build
+          su builder -c 'cd ~/build && makepkg --nodeps --noconfirm'
+
+      - name: Turn it into a release archive
+        run: |
+          version=${TAG#v}
+          mkdir stage
+          bsdtar -xf /home/builder/build/divine-launcher-"$version"-*.pkg.tar.zst -C stage usr
+          tar -czf divine-"$version"-x86_64.tar.gz -C stage usr
+          sha256sum divine-"$version"-x86_64.tar.gz > divine-"$version"-x86_64.tar.gz.sha256
+          cat divine-"$version"-x86_64.tar.gz.sha256
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "Divine ${TAG#v}" --notes ""
+          gh release upload "$TAG" divine-*-x86_64.tar.gz divine-*-x86_64.tar.gz.sha256 --clobber
