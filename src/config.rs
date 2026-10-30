@@ -1,13 +1,15 @@
 //! Divine's own settings plus the XDG paths it works with.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::known_fixes::Fix;
 use crate::log::warn;
+use crate::runtimes::Runtime;
 
 const APP_DIR: &str = "divine";
 
@@ -101,7 +103,8 @@ pub fn foreign_legendary_dirs() -> Vec<PathBuf> {
     ]
 }
 
-/// How big the window was left, so it comes back the same size.
+/// How the window was left, so it comes back the same: its size, and the game
+/// pages whose known fixes were folded away.
 ///
 /// Only what the window manager cannot work out for itself: the position is
 /// none of an application's business under Wayland, and asking for one is
@@ -112,6 +115,10 @@ pub struct WindowState {
     pub width: i32,
     pub height: i32,
     pub maximized: bool,
+    /// App names. Folded once, a game's fixes stay folded until unfolded:
+    /// the note is worth reading the first time, not every time.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub folded_fixes: BTreeSet<String>,
 }
 
 impl Default for WindowState {
@@ -120,6 +127,7 @@ impl Default for WindowState {
             width: 1150,
             height: 760,
             maximized: false,
+            folded_fixes: BTreeSet::new(),
         }
     }
 }
@@ -199,12 +207,18 @@ pub struct GameSettings {
     /// exits rather than warning.
     pub skip_update_check: bool,
     /// Start the game through a wrapper named EpicGamesLauncher.exe. Rockstar
-    /// titles refuse to see the game as owned without it.
-    pub use_fake_epic_exe: bool,
+    /// titles refuse to see the game as owned without it. `None` follows the
+    /// known fixes, like the two runtimes below.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fake_epic_launcher: Option<bool>,
     /// Anti-cheat runtimes Proton mounts into the prefix. Per game only: they
     /// are dead weight for the many titles that ship neither anti-cheat.
-    pub eac_runtime: bool,
-    pub battleye_runtime: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eac: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub battleye: Option<bool>,
+    #[serde(flatten, skip_serializing)]
+    pub old_switches: OldSwitches,
     /// Overrides of the matching global switches. `None` means "follow global";
     /// they are skipped when writing so an untouched game stays out of the file.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,11 +245,66 @@ pub struct GameSettings {
     pub env: BTreeMap<String, String>,
 }
 
+/// The wrapper and the two runtimes as plain switches, the way Divine wrote
+/// them before the known fixes. Read once, carried over by
+/// [`GameSettings::carry_over_switches`], and never written again.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct OldSwitches {
+    use_fake_epic_exe: bool,
+    eac_runtime: bool,
+    battleye_runtime: bool,
+}
+
 impl GameSettings {
-    pub fn runtime_enabled(&self, runtime: crate::runtimes::Runtime) -> bool {
+    /// Whether the game starts through the wrapper: the override if there is
+    /// one, otherwise whatever the known fixes say about this game.
+    pub fn fake_epic_launcher(&self, fix: Option<&Fix>) -> bool {
+        self.fake_epic_launcher
+            .unwrap_or_else(|| fix.is_some_and(|fix| fix.fake_epic_launcher))
+    }
+
+    /// Same rule as [`Self::fake_epic_launcher`], for one anti-cheat runtime.
+    pub fn runtime_enabled(&self, runtime: Runtime, fix: Option<&Fix>) -> bool {
+        self.runtime_override(runtime)
+            .unwrap_or_else(|| fix.is_some_and(|fix| fix.runtime(runtime)))
+    }
+
+    pub fn runtime_override(&self, runtime: Runtime) -> Option<bool> {
         match runtime {
-            crate::runtimes::Runtime::Eac => self.eac_runtime,
-            crate::runtimes::Runtime::BattlEye => self.battleye_runtime,
+            Runtime::Eac => self.eac,
+            Runtime::BattlEye => self.battleye,
+        }
+    }
+
+    pub fn set_runtime_override(&mut self, runtime: Runtime, value: Option<bool>) {
+        match runtime {
+            Runtime::Eac => self.eac = value,
+            Runtime::BattlEye => self.battleye = value,
+        }
+    }
+
+    /// A switch an older Divine wrote as on stays on: as an override, unless
+    /// the known fix for the game turns it on anyway, in which case the game
+    /// simply follows the fix. One written as off is left to the fix too: back
+    /// then off was where every switch started, not something anybody chose.
+    fn carry_over_switches(&mut self, fix: Option<&Fix>) {
+        let old = std::mem::take(&mut self.old_switches);
+        if old.use_fake_epic_exe && self.fake_epic_launcher.is_none() {
+            let fixed = fix.is_some_and(|fix| fix.fake_epic_launcher);
+            self.fake_epic_launcher = crate::known_fixes::departure(true, fixed);
+        }
+        for (was_on, runtime) in [
+            (old.eac_runtime, Runtime::Eac),
+            (old.battleye_runtime, Runtime::BattlEye),
+        ] {
+            if was_on && self.runtime_override(runtime).is_none() {
+                let carried = crate::known_fixes::departure(
+                    true,
+                    fix.is_some_and(|fix| fix.runtime(runtime)),
+                );
+                self.set_runtime_override(runtime, carried);
+            }
         }
     }
 
@@ -249,9 +318,6 @@ impl GameSettings {
             && self.override_username.is_empty()
             && !self.offline
             && !self.skip_update_check
-            && !self.use_fake_epic_exe
-            && !self.eac_runtime
-            && !self.battleye_runtime
             && self.env.is_empty()
             && [
                 self.use_umu,
@@ -264,6 +330,9 @@ impl GameSettings {
                 self.ntsync,
                 self.gamemode,
                 self.mangohud,
+                self.fake_epic_launcher,
+                self.eac,
+                self.battleye,
             ]
             .iter()
             .all(Option::is_none)
@@ -407,7 +476,7 @@ impl Config {
 
     /// Never fails: a missing or broken config falls back to defaults.
     pub fn load() -> Self {
-        let mut cfg: Self = fs::read_to_string(Self::path())
+        let cfg: Self = fs::read_to_string(Self::path())
             .ok()
             .and_then(|s| match toml::from_str(&s) {
                 Ok(cfg) => Some(cfg),
@@ -417,16 +486,21 @@ impl Config {
                 }
             })
             .unwrap_or_default();
+        cfg.upgraded(crate::known_fixes::for_game)
+    }
 
-        if cfg.runner.proton == LATEST_GE_PROTON_WAS {
-            cfg.runner.proton = LATEST_GE_PROTON.into();
+    /// Brings a config written by an older Divine up to what this one reads.
+    fn upgraded(mut self, fixes: impl Fn(&str) -> Option<Fix>) -> Self {
+        if self.runner.proton == LATEST_GE_PROTON_WAS {
+            self.runner.proton = LATEST_GE_PROTON.into();
         }
-        for settings in cfg.games.values_mut() {
+        for (app_name, settings) in self.games.iter_mut() {
             if settings.proton == LATEST_GE_PROTON_WAS {
                 settings.proton = LATEST_GE_PROTON.into();
             }
+            settings.carry_over_switches(fixes(app_name).as_ref());
         }
-        cfg
+        self
     }
 
     pub fn save(&self) -> Result<()> {
@@ -504,6 +578,7 @@ mod tests {
             width: 1280,
             height: 900,
             maximized: false,
+            folded_fixes: ["Heather".to_string()].into_iter().collect(),
         };
         cfg.set_game(
             "Fowl",
@@ -523,6 +598,7 @@ mod tests {
         assert_eq!(read.runner.proton, "/proton/GE-Proton10");
         assert_eq!(read.downloads.limit, 2048);
         assert_eq!((read.window.width, read.window.height), (1280, 900));
+        assert!(read.window.folded_fixes.contains("Heather"));
         let fowl = read.game("Fowl");
         assert_eq!(fowl.args, "-windowed -nosplash");
         assert_eq!(fowl.hdr, Some(false));
@@ -545,6 +621,68 @@ mod tests {
 
         // Empty is the extreme of the same case.
         assert!(toml::from_str::<Config>("").is_ok());
+    }
+
+    /// Trimmed from a real config.toml written before the known fixes: GTA V
+    /// with the wrapper and BattlEye switched on by hand, EAC left as it was.
+    /// The fix here covers the wrapper and not BattlEye, to see both paths.
+    #[test]
+    fn switches_from_before_the_known_fixes_keep_what_was_chosen() {
+        let gta = "8769e24080ea413b8ebca3f1b8c50951";
+        let cfg = toml::from_str::<Config>(&format!(
+            "[games.{gta}]\n\
+             language = \"ru\"\n\
+             use_fake_epic_exe = true\n\
+             eac_runtime = false\n\
+             battleye_runtime = true\n"
+        ))
+        .expect("reading an old config.toml")
+        .upgraded(|app_name| {
+            (app_name == gta).then(|| Fix {
+                fake_epic_launcher: true,
+                ..Fix::default()
+            })
+        });
+        let fix = Fix {
+            fake_epic_launcher: true,
+            ..Fix::default()
+        };
+        let settings = cfg.game(gta);
+
+        // On, and the fix agrees: the game follows the fix from here on.
+        assert_eq!(settings.fake_epic_launcher, None);
+        assert!(settings.fake_epic_launcher(Some(&fix)));
+        // On, and the fix has nothing to say: kept as a choice.
+        assert_eq!(settings.battleye, Some(true));
+        // Off was only ever the starting point, so it is left to the fixes.
+        assert_eq!(settings.eac, None);
+
+        let written = toml::to_string_pretty(&cfg).expect("writing it back");
+        assert!(written.contains("battleye = true"));
+        assert!(!written.contains("use_fake_epic_exe"));
+        assert!(!written.contains("eac_runtime"));
+    }
+
+    #[test]
+    fn a_choice_in_the_game_settings_beats_a_known_fix() {
+        let fix = Fix {
+            fake_epic_launcher: true,
+            battleye_runtime: true,
+            ..Fix::default()
+        };
+        let untouched = GameSettings::default();
+        assert!(untouched.fake_epic_launcher(Some(&fix)));
+        assert!(untouched.runtime_enabled(Runtime::BattlEye, Some(&fix)));
+        assert!(!untouched.runtime_enabled(Runtime::Eac, Some(&fix)));
+        assert!(!untouched.fake_epic_launcher(None));
+
+        let refused = GameSettings {
+            fake_epic_launcher: Some(false),
+            battleye: Some(false),
+            ..GameSettings::default()
+        };
+        assert!(!refused.fake_epic_launcher(Some(&fix)));
+        assert!(!refused.runtime_enabled(Runtime::BattlEye, Some(&fix)));
     }
 
     #[test]

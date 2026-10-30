@@ -226,6 +226,14 @@ impl App {
         // umu fetches Proton in the middle of a launch; this is what makes that
         // visible instead of the game just taking longer.
         crate::ui::downloads::watch_proton(&this);
+        // The known fixes built into Divine work as they are; a newer list in
+        // the repository is picked up quietly and shows on the next page drawn.
+        let weak = Rc::downgrade(&this);
+        spawn_bg(crate::known_fixes::refresh, move |changed| {
+            if let (true, Some(app)) = (changed, weak.upgrade()) {
+                app.rebuild_game_page();
+            }
+        });
         // A drive unplugged or plugged back in while Divine is open changes
         // which games can be played, so the library follows it as it happens.
         match crate::disk::mount_changes() {

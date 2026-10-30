@@ -189,7 +189,8 @@ const SHIM_WINDOWS_PATH: &str = r"C:\windows\command\EpicGamesLauncher.exe";
 /// Windows path, and hands back that path.
 fn install_shim(drive_c: &Path) -> Result<String> {
     // Fetching here covers a wrapper that went missing after it was switched
-    // on; normally the settings dialog has already brought one down.
+    // on, and one a known fix switched on without the settings dialog ever
+    // bringing it down.
     let shim = crate::shim::ensure().context("preparing the Epic Games Launcher wrapper")?;
     let dir = drive_c.join("windows").join("command");
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -411,9 +412,11 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
 
     // Anti-cheat runtimes are per game, and Proton reads them straight from the
     // environment. Downloading here covers a runtime that went missing after it
-    // was switched on; normally the settings dialog has already fetched it.
+    // was switched on, and one a known fix turned on that nobody has fetched:
+    // the settings dialog only fetches what is switched on in front of it.
+    let fix = crate::known_fixes::for_game(&game.app_name);
     for runtime in crate::runtimes::Runtime::ALL {
-        if !per_game.runtime_enabled(runtime) {
+        if !per_game.runtime_enabled(runtime, fix.as_ref()) {
             continue;
         }
         crate::runtimes::ensure(runtime, &|_, _| {})
@@ -482,7 +485,7 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
 
     // Goes last in the wrapper: legendary appends the game executable straight
     // after it, which is exactly the argument the shim expects.
-    if per_game.use_fake_epic_exe {
+    if per_game.fake_epic_launcher(fix.as_ref()) {
         wrapper.push(install_shim(&drive_c)?);
     }
 

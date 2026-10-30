@@ -1,0 +1,46 @@
+{
+  "revision": 1,
+  "games": {
+    "9d2d0eb64d5c44529cece33fe2a46482": {
+      "title": "Grand Theft Auto V",
+      "fake_epic_launcher": true,
+      "battleye_runtime": true,
+      "note": "Rockstar's launcher only sees the game as owned when the Epic Games Launcher starts it. To get GTA Online working, read the page linked below.",
+      "page": "gta-online.md",
+      "page_title": "GTA Online on Linux"
+    },
+    "8769e24080ea413b8ebca3f1b8c50951": {
+      "title": "Grand Theft Auto V Enhanced",
+      "fake_epic_launcher": true,
+      "battleye_runtime": true,
+      "note": "Rockstar's launcher only sees the game as owned when the Epic Games Launcher starts it. To get GTA Online working, read the page linked below.",
+      "page": "gta-online.md",
+      "page_title": "GTA Online on Linux"
+    },
+    "Heather": {
+      "title": "Red Dead Redemption 2",
+      "fake_epic_launcher": true,
+      "note": "Rockstar's launcher only sees the game as owned when the Epic Games Launcher starts it."
+    },
+    "c180bd9859624278aa20f1333918498a": {
+      "title": "Red Dead Redemption",
+      "fake_epic_launcher": true,
+      "note": "Rockstar's launcher only sees the game as owned when the Epic Games Launcher starts it."
+    },
+    "3419b0161b3c4b5da5f33ab69ad030f0": {
+      "title": "Grand Theft Auto III – The Definitive Edition",
+      "fake_epic_launcher": true,
+      "note": "Rockstar's launcher only sees the game as owned when the Epic Games Launcher starts it."
+    },
+    "bb5b67d981cd47779e98a3a678360238": {
+      "title": "Grand Theft Auto: Vice City – The Definitive Edition",
+      "fake_epic_launcher": true,
+      "note": "Rockstar's launcher only sees the game as owned when the Epic Games Launcher starts it."
+    },
+    "0828ecd4297c4f89bfcc45420e695b67": {
+      "title": "Grand Theft Auto: San Andreas – The Definitive Edition",
+      "fake_epic_launcher": true,
+      "note": "Rockstar's launcher only sees the game as owned when the Epic Games Launcher starts it."
+    }
+  }
+}

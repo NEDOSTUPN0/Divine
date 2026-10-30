@@ -15,6 +15,7 @@ mod disk;
 mod epic;
 mod gamesdb;
 mod http;
+mod known_fixes;
 mod legendary;
 mod log;
 mod models;

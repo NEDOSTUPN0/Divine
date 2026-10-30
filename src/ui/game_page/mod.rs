@@ -6,6 +6,7 @@
 
 mod achievements;
 mod collections;
+mod fixes;
 mod install;
 mod launch;
 mod maintenance;
@@ -21,6 +22,7 @@ use crate::models::{human_size, Game};
 use crate::ui::{game_card, spawn_bg, window::App};
 
 use self::achievements::achievements_block;
+use self::fixes::fixes_group;
 use self::install::{components_dialog, dlc_dialog, tags_size};
 pub use self::launch::restore_running;
 use self::launch::{action_button, force_stop};
@@ -99,6 +101,11 @@ pub fn page(app: &Rc<App>, index: usize) -> Option<adw::NavigationPage> {
         .margin_bottom(24)
         .build();
     content.append(&header_block);
+    // Above the screenshots: what Divine does differently for this game is
+    // worth knowing before pressing Play, not after scrolling past the art.
+    if let Some(fixes) = fixes_group(app, &game) {
+        content.append(&fixes);
+    }
 
     // Made here because the band of facts holds it and the store fills it in,
     // and the store answers first when its page has been read before.

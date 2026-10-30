@@ -92,6 +92,30 @@ impl Writer {
         row
     }
 
+    /// A switch for a setting the known fixes can decide. It shows what the
+    /// game will get, and only a position that differs from the fix is written
+    /// down, so a game nobody touched keeps following the list as it changes.
+    fn fixed_switch(
+        &self,
+        title: &str,
+        subtitle: &str,
+        value: Option<bool>,
+        fixed: bool,
+        set: impl Fn(&mut GameSettings, Option<bool>) + 'static,
+    ) -> adw::SwitchRow {
+        let subtitle = if fixed {
+            format!("{subtitle} Known fixes turn it on for this game.")
+        } else {
+            subtitle.to_string()
+        };
+        self.switch(
+            title,
+            &subtitle,
+            value.unwrap_or(fixed),
+            move |settings, on| set(settings, crate::known_fixes::departure(on, fixed)),
+        )
+    }
+
     /// A text field, written when its apply button is pressed rather than on
     /// every keystroke: half a typed path or a half typed variable is neither.
     fn entry(
@@ -152,12 +176,14 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         });
     }
 
-    let fake_epic = write.switch(
+    let fix = crate::known_fixes::for_game(&game.app_name);
+    let fake_epic = write.fixed_switch(
         "Fake Epic Games Launcher",
         "Starts the game through a wrapper named EpicGamesLauncher.exe. \
          Rockstar titles need this or they offer to sell you the game.",
-        saved.use_fake_epic_exe,
-        |settings, on| settings.use_fake_epic_exe = on,
+        saved.fake_epic_launcher,
+        fix.as_ref().is_some_and(|fix| fix.fake_epic_launcher),
+        |settings, value| settings.fake_epic_launcher = value,
     );
 
     // A packaged Divine ships the wrapper and this never fires. One whose
@@ -408,7 +434,8 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
             app,
             &write,
             runtime,
-            saved.runtime_enabled(runtime),
+            saved.runtime_override(runtime),
+            fix.as_ref().is_some_and(|fix| fix.runtime(runtime)),
         ));
     }
 
@@ -472,24 +499,19 @@ fn runtime_row(
     app: &Rc<App>,
     write: &Writer,
     runtime: crate::runtimes::Runtime,
-    active: bool,
+    value: Option<bool>,
+    fixed: bool,
 ) -> adw::SwitchRow {
-    let eac = runtime == crate::runtimes::Runtime::Eac;
-    let row = write.switch(
+    let row = write.fixed_switch(
         runtime.title(),
-        if eac {
+        if runtime == crate::runtimes::Runtime::Eac {
             "Needed by games using EasyAntiCheat"
         } else {
             "Needed by games using BattlEye"
         },
-        active,
-        move |settings, on| {
-            if eac {
-                settings.eac_runtime = on;
-            } else {
-                settings.battleye_runtime = on;
-            }
-        },
+        value,
+        fixed,
+        move |settings, value| settings.set_runtime_override(runtime, value),
     );
 
     let weak = Rc::downgrade(app);
