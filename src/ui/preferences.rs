@@ -16,7 +16,7 @@ use crate::models::human_size;
 use crate::runner::Runner;
 use crate::ui::proton_page;
 use crate::ui::spawn_bg;
-use crate::ui::{accessible_label, window::App};
+use crate::ui::{accessible_label, window::App, wrapping_list};
 
 /// Writes one setting through, the moment it is changed.
 ///
@@ -77,6 +77,7 @@ pub fn show(app: &Rc<App>) {
     let proton = adw::ComboRow::builder()
         .title("Proton")
         .use_markup(false)
+        .list_factory(&wrapping_list())
         .build();
     fill_protons(app, &proton);
     let weak = Rc::downgrade(app);

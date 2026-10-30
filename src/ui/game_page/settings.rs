@@ -10,7 +10,7 @@ use crate::config::GameSettings;
 use crate::log::warn;
 use crate::models::{human_size, Game};
 use crate::runner::{self, Runner};
-use crate::ui::{spawn_bg, window::App};
+use crate::ui::{spawn_bg, window::App, wrapping_list};
 
 use super::launch::show_launch_command;
 use super::row;
@@ -136,6 +136,7 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         ))
         .selected(selected)
         .use_markup(false)
+        .list_factory(&wrapping_list())
         .build();
     {
         let writer = write.clone();
