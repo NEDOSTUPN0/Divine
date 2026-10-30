@@ -5,3 +5,6 @@
 # A one-line import of AGENTS.md, so Claude Code loads the same rules every
 # other tool reads. Undoes a global ignore of this name.
 !CLAUDE.md
+packaging/arch*/*
+!packaging/arch*/PKGBUILD
+!packaging/arch*/README.md
