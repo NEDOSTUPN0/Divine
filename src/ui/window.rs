@@ -49,13 +49,14 @@ type Watcher = Box<dyn Fn(&Rc<App>) -> bool>;
 ///
 /// Ctrl+W and Ctrl+Q both close the window rather than the application, so a
 /// download in flight gets its question whichever one is pressed.
-const ACCELS: [(&str, &[&str]); 7] = [
+const ACCELS: [(&str, &[&str]); 8] = [
     ("win.search", &["<Control>f"]),
     ("win.refresh", &["<Control>r", "F5"]),
     ("win.collection-new", &["<Control>n"]),
     ("win.preferences", &["<Control>comma"]),
     ("win.show-help-overlay", &["<Control>question"]),
     ("win.menu", &["F10"]),
+    ("win.toggle-sidebar", &["F9"]),
     ("win.close", &["<Control>w", "<Control>q"]),
 ];
 
@@ -380,6 +381,7 @@ impl App {
             ("collection-new", Self::new_collection),
             ("search", Self::start_search),
             ("menu", Self::open_menu),
+            ("toggle-sidebar", Self::toggle_sidebar),
             ("show-help-overlay", Self::show_shortcuts),
             ("close", Self::close),
         ] {
@@ -447,6 +449,10 @@ impl App {
             self.split.set_show_sidebar(true);
         }
         button.popup();
+    }
+
+    fn toggle_sidebar(self: &Rc<Self>) {
+        self.split.set_show_sidebar(!self.split.shows_sidebar());
     }
 
     /// Closing through the window rather than the application, so that a
@@ -761,11 +767,10 @@ impl App {
             .build()
     }
 
-    fn build_library_page(self: &Rc<Self>) {
-        let header = adw::HeaderBar::new();
-
-        // Only shown while the sidebar is away, since that is the one place left
-        // to bring it back from.
+    /// The button that brings the sidebar back, for the header of every page
+    /// beside it. Only shown while the sidebar is away, and on whichever page is
+    /// showing, since that is the one place left to bring it back from.
+    pub fn sidebar_button(&self) -> gtk::Button {
         let reveal = gtk::Button::builder()
             .icon_name("sidebar-show-symbolic")
             .tooltip_text("Show Sidebar")
@@ -778,7 +783,12 @@ impl App {
             .invert_boolean()
             .sync_create()
             .build();
-        header.pack_start(&reveal);
+        reveal
+    }
+
+    fn build_library_page(self: &Rc<Self>) {
+        let header = adw::HeaderBar::new();
+        header.pack_start(&self.sidebar_button());
 
         let search_bar = self.search_bar.clone();
         search_bar.set_child(Some(&self.search));
@@ -1267,6 +1277,10 @@ fn shortcuts_dialog() -> adw::ShortcutsDialog {
 
     let navigation = adw::ShortcutsSection::new(Some("Navigation"));
     navigation.add(adw::ShortcutsItem::new("Go Back", "Escape <Alt>Left"));
+    navigation.add(adw::ShortcutsItem::from_action(
+        "Show or Hide Sidebar",
+        "win.toggle-sidebar",
+    ));
     dialog.add(navigation);
 
     let general = adw::ShortcutsSection::new(Some("General"));

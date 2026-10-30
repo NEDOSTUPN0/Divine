@@ -129,6 +129,7 @@ pub fn page(app: &Rc<App>, index: usize) -> Option<adw::NavigationPage> {
         .build();
 
     let header = adw::HeaderBar::new();
+    header.pack_start(&app.sidebar_button());
     header.pack_end(&collections::favorite_button(app, &game));
     let menu = gio::Menu::new();
     menu.append(Some("Collections…"), Some("game.collections"));
