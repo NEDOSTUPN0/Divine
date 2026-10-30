@@ -50,6 +50,7 @@ fn agent(user_agent: &str, timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .user_agent(user_agent)
+        .proxy(crate::http::proxy())
         .build()
         .new_agent()
 }

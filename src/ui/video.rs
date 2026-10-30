@@ -45,6 +45,18 @@ impl Player {
             .build()
             .context("building the pipeline")?;
 
+        // souphttpsrc fetches the trailer, and takes its proxy from here
+        // rather than from anything Divine's own requests go through.
+        if let Some(relay) = crate::relay::address() {
+            pipeline.connect("source-setup", false, move |values| {
+                let source = values.get(1)?.get::<gst::Element>().ok()?;
+                if source.has_property("proxy") {
+                    source.set_property("proxy", &relay);
+                }
+                None
+            });
+        }
+
         // Paused rather than playing: this fills the first frame in, so the
         // widget shows the trailer's own opening rather than a black square.
         pipeline

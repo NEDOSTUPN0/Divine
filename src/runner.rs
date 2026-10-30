@@ -325,7 +325,12 @@ pub fn winetricks(game: &Game, cfg: &Config, verb: &str) -> Result<()> {
     let prefix = cfg.general.prefixes_dir.join(prefix_name(game));
     fs::create_dir_all(&prefix)?;
 
-    let output = Command::new(&cfg.general.umu)
+    let mut command = Command::new(&cfg.general.umu);
+    // winetricks downloads what a verb installs.
+    if let Some(relay) = crate::relay::address() {
+        crate::relay::point(&mut command, &relay);
+    }
+    let output = command
         .args(["winetricks", verb])
         // umu runs inside its own container, where a TMPDIR inherited from the
         // outside (a nix develop shell sets one) does not exist, and winetricks

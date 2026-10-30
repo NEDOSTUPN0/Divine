@@ -9,7 +9,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 use crate::cleanup::{self, Sweep};
-use crate::config::{Config, LATEST_GE_PROTON};
+use crate::config::{Config, ProxyKind, LATEST_GE_PROTON};
 use crate::epic::playtime;
 use crate::legendary::Legendary;
 use crate::models::human_size;
@@ -30,6 +30,7 @@ fn apply(app: &Rc<App>, change: impl FnOnce(&mut Config)) {
     // legendary is told which binary to run and how fast to download through
     // this, so it is rebuilt from whatever the config now says.
     *app.lgd.borrow_mut() = Legendary::new(&cfg);
+    crate::proxy::apply(&cfg.proxy);
     if let Err(e) = cfg.save() {
         app.toast_error("Cannot save preferences", &e);
     }
@@ -279,7 +280,7 @@ pub fn show(app: &Rc<App>) {
             apply(&app, |cfg| cfg.downloads.limit = kib);
             // A download already running picks the new ceiling up straight
             // away, as long as it was started with one to begin with.
-            crate::throttle::set_limit(app.cfg.borrow().downloads.limit_bytes());
+            crate::relay::set_limit(app.cfg.borrow().downloads.limit_bytes());
         }
     };
     let on_toggle = save_limit.clone();
@@ -370,6 +371,7 @@ pub fn show(app: &Rc<App>) {
     general.add(&sync_group);
     general.add(&epic_group);
     general.add(&downloads_group);
+    general.add(&proxy_group(app, &cfg));
     general.add(&tools_group);
     general.add(&paths_group);
 
@@ -384,6 +386,102 @@ pub fn show(app: &Rc<App>) {
         &username,
     ));
     dialog.present(Some(&app.window));
+}
+
+/// Where everything goes out through, for a network that cannot reach Epic
+/// directly. The details fold away behind the switch, since most people never
+/// need them.
+fn proxy_group(app: &Rc<App>, cfg: &Config) -> adw::PreferencesGroup {
+    let proxy = &cfg.proxy;
+    let defaults = Config::default().proxy;
+
+    let use_proxy = adw::ExpanderRow::builder()
+        .title("Use a Proxy")
+        .show_enable_switch(true)
+        .enable_expansion(proxy.enabled)
+        .build();
+    let weak = Rc::downgrade(app);
+    use_proxy.connect_enable_expansion_notify(move |row| {
+        if let Some(app) = weak.upgrade() {
+            let on = row.enables_expansion();
+            apply(&app, |cfg| cfg.proxy.enabled = on);
+        }
+    });
+
+    const KINDS: [(ProxyKind, &str); 2] =
+        [(ProxyKind::Http, "HTTP"), (ProxyKind::Socks5, "SOCKS5")];
+    let kind = adw::ComboRow::builder()
+        .title("Type")
+        .model(&gtk::StringList::new(&KINDS.map(|(_, name)| name)))
+        .selected(
+            KINDS
+                .iter()
+                .position(|(kind, _)| *kind == proxy.kind)
+                .unwrap_or(0) as u32,
+        )
+        .build();
+    let weak = Rc::downgrade(app);
+    kind.connect_selected_notify(move |row| {
+        if let (Some(app), Some((kind, _))) = (weak.upgrade(), KINDS.get(row.selected() as usize)) {
+            apply(&app, |cfg| cfg.proxy.kind = *kind);
+        }
+    });
+
+    let host = text_row(app, "Server", &proxy.host, &defaults.host, |cfg, host| {
+        cfg.proxy.host = host
+    });
+    let port = adw::SpinRow::builder()
+        .title("Port")
+        .adjustment(&gtk::Adjustment::new(
+            proxy.port as f64,
+            1.0,
+            65535.0,
+            1.0,
+            10.0,
+            0.0,
+        ))
+        .build();
+    let weak = Rc::downgrade(app);
+    port.connect_value_notify(move |row| {
+        if let Some(app) = weak.upgrade() {
+            let port = row.value() as u16;
+            apply(&app, |cfg| cfg.proxy.port = port);
+        }
+    });
+
+    let username = text_row(app, "Username", &proxy.username, "", |cfg, name| {
+        cfg.proxy.username = name
+    });
+    // Not text_row: a password is taken exactly as typed, spaces and all.
+    let password = adw::PasswordEntryRow::builder()
+        .title("Password")
+        .text(&proxy.password)
+        .show_apply_button(true)
+        .build();
+    let weak = Rc::downgrade(app);
+    password.connect_apply(move |row| {
+        if let Some(app) = weak.upgrade() {
+            let password = row.text().to_string();
+            apply(&app, |cfg| cfg.proxy.password = password);
+        }
+    });
+
+    use_proxy.add_row(&kind);
+    use_proxy.add_row(&host);
+    use_proxy.add_row(&port);
+    use_proxy.add_row(&username);
+    use_proxy.add_row(&password);
+
+    let group = adw::PreferencesGroup::builder()
+        .title("Proxy")
+        .description(
+            "For a network that cannot reach Epic directly. Divine, legendary, umu \
+             and the games Divine starts all connect through it. Leave the username \
+             empty for a proxy that does not ask for one.",
+        )
+        .build();
+    group.add(&use_proxy);
+    group
 }
 
 /// Redraws the list of Proton builds from what is on disk now, keeping the

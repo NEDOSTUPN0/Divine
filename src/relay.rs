@@ -1,19 +1,25 @@
-//! A rate-limited HTTP proxy in front of legendary's downloads.
+//! The local HTTP proxy legendary, umu and Divine itself are pointed at.
 //!
-//! legendary has no bandwidth setting of its own — no flag, no config key, no
-//! throttle anywhere in its downloader. What it does have is download workers
-//! built on plain `requests` sessions, and those honour `HTTPS_PROXY`. So
-//! Divine puts itself in the middle and holds the line there.
+//! It does two jobs. legendary has no bandwidth setting of its own — no flag,
+//! no config key, no throttle anywhere in its downloader. What it does have is
+//! download workers built on plain `requests` sessions, and those honour
+//! `HTTPS_PROXY`. So Divine puts itself in the middle and holds the line there.
+//! And when a proxy is set in the preferences, everything goes out through it
+//! from here; [`crate::proxy`] says why the programs are not simply handed
+//! that proxy themselves.
 //!
-//! One proxy serves the whole process. Several downloads can run at once and
-//! legendary forks a worker per connection, so a per-connection or per-process
-//! limit would mean nothing; the point of a single shared token bucket is that
-//! the number in the preferences is the number on the wire.
+//! Downloads share one throttled relay. Several can run at once and legendary
+//! forks a worker per connection, so a per-connection or per-process limit
+//! would mean nothing; the point of a single shared token bucket is that the
+//! number in the preferences is the number on the wire. It exists only while a
+//! download is holding it. Every download that is given the address takes a
+//! [`Lease`] and keeps it until legendary exits, and the last lease dropped
+//! takes the listener down with it — so nothing is left listening once the
+//! downloads are done, or once the limit is switched off.
 //!
-//! It exists only while a download is holding it. Every download that is given
-//! the address takes a [`Lease`] and keeps it until legendary exits, and the
-//! last lease dropped takes the listener down with it — so nothing is left
-//! listening once the downloads are done, or once the limit is switched off.
+//! Everything else goes through a second, unthrottled relay that stays open
+//! for as long as the proxy is set, since Divine's own requests come and go at
+//! any moment and a game started through it may run for hours.
 //!
 //! Nothing is inspected. A CONNECT becomes a blind byte pump, which is what
 //! keeps TLS out of this entirely — no certificate to trust, no traffic to
@@ -23,6 +29,7 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -45,14 +52,17 @@ const BUFFER: usize = 8 * 1024;
 /// nothing and means a limit changed mid-download is picked up promptly.
 const SLICE: Duration = Duration::from_millis(500);
 
-/// The one proxy the process shares, for as long as anything wants it.
+/// The relay downloads share, for as long as one of them wants it.
 static PROXY: Mutex<Option<Proxy>> = Mutex::new(None);
 /// Downloads currently holding a lease.
 static HOLDERS: AtomicUsize = AtomicUsize::new(0);
 
-/// Claims the proxy for one download, or hands back `None` when there is no
-/// limit to hold. Someone who never sets a limit never runs a proxy at all,
-/// and their downloads go out exactly as they did before.
+/// The relay for everything else, open while a proxy is set.
+static OPEN: Mutex<Option<Proxy>> = Mutex::new(None);
+
+/// Claims the throttled relay for one download, or hands back `None` when
+/// there is no limit to hold. Someone who never sets a limit never runs one,
+/// and their downloads go out the way everything else does.
 pub fn lease(bytes_per_second: u64) -> Option<Lease> {
     if bytes_per_second == 0 {
         return None;
@@ -86,6 +96,40 @@ pub fn set_limit(bytes_per_second: u64) {
     }
 }
 
+/// Opens the unthrottled relay, or closes it. Programs started while it was
+/// open keep its address, so closing it cuts them off from the proxy along
+/// with everything else, which is what switching the proxy off asks for.
+pub fn stay_open(open: bool) {
+    let mut slot = OPEN.lock().unwrap();
+    if !open {
+        slot.take();
+        return;
+    }
+    if slot.is_none() {
+        match Proxy::start(0) {
+            Ok(proxy) => *slot = Some(proxy),
+            Err(e) => error!("cannot go through the proxy: {e:#}"),
+        }
+    }
+}
+
+/// Where to send what should go out through the proxy, while one is set.
+pub fn address() -> Option<String> {
+    OPEN.lock()
+        .unwrap()
+        .as_ref()
+        .map(|proxy| proxy.address.clone())
+}
+
+/// Points a program Divine runs at `address`, in every spelling, since each
+/// reads a different one: umu only `https_proxy`, curl `http_proxy` only in
+/// lower case, `requests` either.
+pub fn point(cmd: &mut Command, address: &str) {
+    for name in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"] {
+        cmd.env(name, address);
+    }
+}
+
 /// One download's claim on the proxy. Dropping the last one shuts it down.
 pub struct Lease {
     address: String,
@@ -116,7 +160,7 @@ struct Proxy {
 
 impl Proxy {
     fn start(bytes_per_second: u64) -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").context("binding the download proxy")?;
+        let listener = TcpListener::bind("127.0.0.1:0").context("binding the relay")?;
         let local = listener.local_addr()?;
         let address = format!("http://{local}");
         let bucket = Arc::new(Bucket::new(bytes_per_second));
@@ -133,7 +177,7 @@ impl Proxy {
                 let bucket = shared.clone();
                 thread::spawn(move || {
                     if let Err(e) = serve(client, &bucket) {
-                        warn!("download proxy: {e:#}");
+                        warn!("relay: {e:#}");
                     }
                 });
             }
@@ -182,8 +226,7 @@ fn serve(client: TcpStream, bucket: &Bucket) -> Result<()> {
     let target = parts.next().unwrap_or_default().to_string();
 
     if method.eq_ignore_ascii_case("CONNECT") {
-        let upstream =
-            TcpStream::connect(&target).with_context(|| format!("connecting to {target}"))?;
+        let upstream = crate::proxy::dial(&target)?;
         (&client).write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")?;
         // A client that pipelined past the CONNECT left bytes in the buffer,
         // and they belong to the tunnel.
@@ -194,8 +237,7 @@ fn serve(client: TcpStream, bucket: &Bucket) -> Result<()> {
 
     let (host, path) = split_target(&target)
         .with_context(|| format!("{method} {target} is not something this proxy forwards"))?;
-    let mut upstream =
-        TcpStream::connect(&host).with_context(|| format!("connecting to {host}"))?;
+    let mut upstream = crate::proxy::dial(&host)?;
     let mut head = format!("{method} {path} HTTP/1.1\r\n");
     for field in fields {
         // Ours to answer, not the origin server's.

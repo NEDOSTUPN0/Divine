@@ -1,7 +1,10 @@
 //! Divine's own settings plus the XDG paths it works with.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -344,7 +347,7 @@ impl GameSettings {
 pub struct DownloadSettings {
     /// Ceiling for downloads in KiB/s, zero for none. legendary has no
     /// bandwidth setting, so Divine proxies its downloads to hold this; see
-    /// src/throttle.rs. One ceiling covers every download at once, which is
+    /// src/relay.rs. One ceiling covers every download at once, which is
     /// the only reading that makes sense with several of them running.
     pub limit: u64,
     /// Name a new install's folder the way Discord expects; see src/discord.rs.
@@ -388,6 +391,63 @@ impl Default for TrailerSettings {
     }
 }
 
+/// A proxy for everything Divine, legendary, umu and the games send; see
+/// src/proxy.rs.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxySettings {
+    pub enabled: bool,
+    pub kind: ProxyKind,
+    pub host: String,
+    pub port: u16,
+    /// Empty for a proxy that asks nobody to sign in.
+    pub username: String,
+    pub password: String,
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        // Most of the proxies people reach for are a client running on the
+        // same machine.
+        Self {
+            enabled: false,
+            kind: ProxyKind::Socks5,
+            host: "127.0.0.1".into(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+impl ProxySettings {
+    /// Switched on, and with somewhere to go.
+    pub fn is_set(&self) -> bool {
+        self.enabled && !self.host.trim().is_empty() && self.port != 0
+    }
+}
+
+/// Written by hand so the password never lands in a log by way of `{:?}`.
+impl fmt::Debug for ProxySettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProxySettings")
+            .field("enabled", &self.enabled)
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"<hidden>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyKind {
+    Http,
+    Socks5,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -396,6 +456,7 @@ pub struct Config {
     pub runner: RunnerSettings,
     pub downloads: DownloadSettings,
     pub trailers: TrailerSettings,
+    pub proxy: ProxySettings,
     pub games: BTreeMap<String, GameSettings>,
 }
 
@@ -506,7 +567,20 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         fs::create_dir_all(config_dir())?;
         let text = toml::to_string_pretty(self)?;
-        fs::write(Self::path(), text).context("writing config.toml")
+        // Readable by its owner alone, since it can hold the proxy's password.
+        // The mode only applies to a file being created, so an older one is
+        // narrowed down as well.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(Self::path())
+            .context("opening config.toml")?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .context("restricting config.toml to its owner")?;
+        file.write_all(text.as_bytes())
+            .context("writing config.toml")
     }
 }
 
@@ -580,6 +654,14 @@ mod tests {
             maximized: false,
             folded_fixes: ["Heather".to_string()].into_iter().collect(),
         };
+        cfg.proxy = ProxySettings {
+            enabled: true,
+            kind: ProxyKind::Http,
+            host: "proxy.lan".into(),
+            port: 3128,
+            username: "nedo".into(),
+            password: "p@ss word".into(),
+        };
         cfg.set_game(
             "Fowl",
             GameSettings {
@@ -599,10 +681,18 @@ mod tests {
         assert_eq!(read.downloads.limit, 2048);
         assert_eq!((read.window.width, read.window.height), (1280, 900));
         assert!(read.window.folded_fixes.contains("Heather"));
+        assert_eq!(read.proxy, cfg.proxy);
         let fowl = read.game("Fowl");
         assert_eq!(fowl.args, "-windowed -nosplash");
         assert_eq!(fowl.hdr, Some(false));
         assert_eq!(fowl.env.get("DXVK_HUD").map(String::as_str), Some("fps"));
+    }
+
+    #[test]
+    fn the_proxy_password_never_shows_in_debug_output() {
+        let mut cfg = Config::default();
+        cfg.proxy.password = "hunter2".into();
+        assert!(!format!("{cfg:?}").contains("hunter2"));
     }
 
     /// A config written by an older build knows nothing about settings added

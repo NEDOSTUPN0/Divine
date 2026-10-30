@@ -201,6 +201,11 @@ impl Legendary {
         // into a path relative to the working directory; whatever Divine was
         // started from should not be on the receiving end of that.
         cmd.current_dir(&self.config_dir);
+        // Everything legendary runs inherits this too, umu and the game among
+        // them, so a launch reaches the proxy as well.
+        if let Some(relay) = crate::relay::address() {
+            crate::relay::point(&mut cmd, &relay);
+        }
         cmd.arg("-y");
         cmd.args(args);
         cmd
@@ -369,15 +374,14 @@ impl Legendary {
         let args = install_args(app_name, place, mode, tags);
 
         let mut cmd = self.command(&args);
-        // legendary's download workers are requests sessions, which read these.
-        // Nothing is set when there is no limit, so an unthrottled download
-        // goes straight out as it always did. The lease is held for the whole
-        // call, which is what keeps the proxy alive exactly as long as it is
-        // being used.
-        let proxy = crate::throttle::lease(self.download_limit);
-        if let Some(proxy) = &proxy {
-            cmd.env("HTTP_PROXY", proxy.address());
-            cmd.env("HTTPS_PROXY", proxy.address());
+        // legendary's download workers are requests sessions, which read the
+        // proxy variables. With no limit there is no lease, and the download
+        // goes out the way everything else does. The lease is held for the
+        // whole call, which is what keeps the relay alive exactly as long as it
+        // is being used.
+        let lease = crate::relay::lease(self.download_limit);
+        if let Some(lease) = &lease {
+            crate::relay::point(&mut cmd, lease.address());
         }
         cmd.stdout(Stdio::inherit()).stderr(Stdio::piped());
         // Its own group, so pausing reaches the worker processes legendary forks

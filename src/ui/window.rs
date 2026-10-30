@@ -120,6 +120,9 @@ pub struct App {
 impl App {
     pub fn build(application: &adw::Application) -> Rc<Self> {
         let cfg = Config::load();
+        // Before anything goes out, so the first request already takes the
+        // route the user chose.
+        crate::proxy::apply(&cfg.proxy);
         let lgd = Legendary::new(&cfg);
 
         let root = gtk::Stack::new();

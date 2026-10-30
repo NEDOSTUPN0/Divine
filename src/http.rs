@@ -32,8 +32,18 @@ pub fn agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .user_agent(USER_AGENT)
+        .proxy(proxy())
         .build()
         .new_agent()
+}
+
+/// The relay while a proxy is set in the preferences, and otherwise whatever
+/// the environment names, which is what an agent does left to itself.
+pub fn proxy() -> Option<ureq::Proxy> {
+    match crate::relay::address() {
+        Some(relay) => ureq::Proxy::new(&relay).ok(),
+        None => ureq::Proxy::try_from_env(),
+    }
 }
 
 /// Asks a service a question and hands back the body, or `None` when there was

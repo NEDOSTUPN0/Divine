@@ -21,12 +21,13 @@ mod log;
 mod models;
 mod proton;
 mod protondb;
+mod proxy;
+mod relay;
 mod runner;
 mod running;
 mod runtimes;
 mod sdl;
 mod shim;
-mod throttle;
 mod ui;
 mod umu;
 
