@@ -3,7 +3,7 @@
 # The files packaging/arch builds, taken from the release instead of compiled
 # here: .github/workflows/release.yml builds them on Arch for every tag.
 pkgname=divine-launcher-bin
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc='Native GTK4 launcher for Epic Games, powered by Legendary (prebuilt)'
 arch=('x86_64')
