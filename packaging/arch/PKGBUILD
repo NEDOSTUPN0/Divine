@@ -5,7 +5,7 @@
 pkgname=divine-launcher
 _name=Divine
 _appid=io.github.NEDOSTUPN0.Divine
-pkgver=1.0.1
+pkgver=1.0.2
 pkgrel=1
 pkgdesc='Native GTK4 launcher for Epic Games, powered by Legendary'
 # 64-bit only: the Epic Games Launcher wrapper is a 64-bit Windows binary.
