@@ -27,9 +27,11 @@ pub fn build(game: &Game) -> gtk::Widget {
         .height_request(COVER_HEIGHT)
         .build();
 
-    // An uninstalled game shows a grey copy of the cover with the colour one on
-    // top of it, hidden. Hovering fades that top layer in.
-    let colour = if game.is_installed() {
+    // A game that cannot be played shows a grey copy of the cover with the
+    // colour one on top of it, hidden. Hovering fades that top layer in.
+    let missing = game.folder_missing();
+    let playable = game.is_installed() && !missing;
+    let colour = if playable {
         None
     } else {
         picture.add_css_class("cover-grey");
@@ -51,14 +53,25 @@ pub fn build(game: &Game) -> gtk::Widget {
         cover.add_overlay(&placeholder);
     }
     if game.is_installed() {
+        let (icon, tooltip) = if missing {
+            (
+                "dialog-warning-symbolic",
+                "Installed, but its folder cannot be found",
+            )
+        } else {
+            ("object-select-symbolic", "Installed")
+        };
         let badge = gtk::Image::builder()
-            .icon_name("object-select-symbolic")
+            .icon_name(icon)
             .pixel_size(14)
             .halign(gtk::Align::End)
             .valign(gtk::Align::Start)
-            .tooltip_text("Installed")
+            .tooltip_text(tooltip)
             .build();
         badge.add_css_class("installed-badge");
+        if missing {
+            badge.add_css_class("missing");
+        }
         cover.add_overlay(&badge);
     }
 
@@ -98,7 +111,7 @@ pub fn build(game: &Game) -> gtk::Widget {
     // than being a second, slightly different one drawn by hand.
     card.add_css_class("card");
     card.add_css_class("game-card");
-    if !game.is_installed() {
+    if !playable {
         card.add_css_class("uninstalled");
     }
     card.set_overflow(gtk::Overflow::Hidden);

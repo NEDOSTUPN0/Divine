@@ -70,6 +70,10 @@ pub(super) fn action_button(app: &Rc<App>, game: &Game) -> gtk::Box {
     // A page rebuilt while the game is up has to come back as a Stop button.
     let running = app.running.borrow().contains_key(&game.app_name);
     set_playing(&button, running);
+    // With the folder away there is nothing to start, and the banner above
+    // says why. A game that is already up keeps its Stop button.
+    let missing = game.folder_missing();
+    button.set_sensitive(running || !missing);
 
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -105,6 +109,9 @@ pub(super) fn action_button(app: &Rc<App>, game: &Game) -> gtk::Box {
             })
             .build();
         update.add_css_class("pill");
+        // legendary only checks that it may write next to the folder, so an
+        // update now would land in the empty mount point and be recorded as done.
+        update.set_sensitive(!missing);
         if must_update {
             // Standing in for Play, so it should look like the thing to press.
             update.add_css_class("suggested-action");

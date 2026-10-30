@@ -44,6 +44,12 @@
   margin: 6px;
 }
 
+/* Installed on a drive that is not there right now. */
+.installed-badge.missing {
+  background-color: @warning_bg_color;
+  color: @warning_fg_color;
+}
+
 .hero-cover {
   border-radius: 12px;
 }

@@ -691,6 +691,14 @@ impl Legendary {
         self.run(&["uninstall", app_name]).map(|_| ())
     }
 
+    /// Drops the record of an install and leaves its files alone, for a game
+    /// whose folder cannot be reached. A drive plugged back in between the
+    /// question and the answer must not have the game deleted off it.
+    pub fn forget(&self, app_name: &str) -> Result<()> {
+        self.run(&["uninstall", app_name, "--keep-files"])
+            .map(|_| ())
+    }
+
     pub fn import(&self, app_name: &str, path: &str) -> Result<()> {
         self.run(&["import", "--skip-dlcs", app_name, path])
             .map(|_| ())

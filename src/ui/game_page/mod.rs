@@ -151,6 +151,14 @@ pub fn page(app: &Rc<App>, index: usize) -> Option<adw::NavigationPage> {
 
     let view = adw::ToolbarView::builder().content(&scroller).build();
     view.add_top_bar(&header);
+    if game.folder_missing() {
+        view.add_top_bar(
+            &adw::Banner::builder()
+                .title("The game folder cannot be found. Connect the drive it is on.")
+                .revealed(true)
+                .build(),
+        );
+    }
     view.insert_action_group("game", Some(&menu_actions(app, &game)));
 
     Some(
@@ -418,6 +426,10 @@ fn steam_app_id(app_name: &str, pinned: &str) -> Option<u32> {
 }
 
 fn menu_actions(app: &Rc<App>, game: &Game) -> gio::SimpleActionGroup {
+    // Each of these works on the game's folder, which is not there to work on.
+    let needs_folder = ["dlcs", "components", "verify", "move"];
+    let missing = game.folder_missing();
+
     let actions = gio::SimpleActionGroup::new();
     for (name, handler) in [
         ("collections", collections::dialog as fn(&Rc<App>, &Game)),
@@ -431,6 +443,7 @@ fn menu_actions(app: &Rc<App>, game: &Game) -> gio::SimpleActionGroup {
         ("uninstall", confirm_uninstall),
     ] {
         let action = gio::SimpleAction::new(name, None);
+        action.set_enabled(!(missing && needs_folder.contains(&name)));
         let weak = Rc::downgrade(app);
         let game = game.clone();
         action.connect_activate(move |_, _| {

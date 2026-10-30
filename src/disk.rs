@@ -1,4 +1,5 @@
-//! Free space, which disk a path is on, and moving a folder between them.
+//! Free space, which disk a path is on, moving a folder between them, and
+//! noticing drives come and go.
 //!
 //! Two different questions get asked here and they have different answers on
 //! btrfs, which is worth spelling out because getting them the wrong way round
@@ -17,6 +18,7 @@
 
 use std::fs;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +30,45 @@ use anyhow::{Context, Result};
 pub enum Copied {
     Done,
     Cancelled,
+}
+
+/// A message each time something is mounted or unmounted anywhere on the system.
+///
+/// The kernel flags an open `/proc/self/mountinfo` with POLLPRI on every change
+/// to the mount table, and the poll that reports it clears the flag again, so
+/// one change wakes this once. GIO's mount monitor rests on the same signal,
+/// but glib-rs keeps file descriptor sources in a crate of its own; a thread
+/// asleep in `poll` costs nothing and needs no new dependency.
+pub fn mount_changes() -> Result<async_channel::Receiver<()>> {
+    let table = fs::File::open("/proc/self/mountinfo").context("opening /proc/self/mountinfo")?;
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::Builder::new()
+        .name("mount-watch".into())
+        .spawn(move || {
+            let mut watch = libc::pollfd {
+                fd: table.as_raw_fd(),
+                events: libc::POLLPRI,
+                revents: 0,
+            };
+            loop {
+                // SAFETY: one pollfd, alive for the whole call, and the file it
+                // names is owned by this thread.
+                if unsafe { libc::poll(&mut watch, 1, -1) } < 0 {
+                    if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return;
+                }
+                if watch.revents & libc::POLLNVAL != 0 || tx.is_closed() {
+                    return;
+                }
+                // A full channel already has a look pending, and one look
+                // covers any number of changes.
+                let _ = tx.try_send(());
+            }
+        })
+        .context("starting the mount watcher")?;
+    Ok(rx)
 }
 
 /// Bytes free on the filesystem holding `path`, or the nearest parent that

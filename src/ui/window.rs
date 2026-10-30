@@ -1,7 +1,7 @@
 //! Main window: a sidebar with library filters next to the cover grid.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -101,6 +101,9 @@ pub struct App {
     pub running: RefCell<HashMap<String, i32>>,
     /// Games with a download or removal in flight.
     pub busy: RefCell<HashMap<String, String>>,
+    /// Installed games whose folder was not there at the last look, so that a
+    /// drive coming or going redraws only the tiles it changed.
+    missing: RefCell<HashSet<String>>,
     /// Seconds played per game as Epic counts them, fetched once per run.
     pub playtime: RefCell<HashMap<String, u64>>,
     /// Achievements per namespace, kept for the session: the page asks for them
@@ -187,6 +190,7 @@ impl App {
             runners: RefCell::new(Vec::new()),
             running: RefCell::new(HashMap::new()),
             busy: RefCell::new(HashMap::new()),
+            missing: RefCell::new(HashSet::new()),
             playtime: RefCell::new(HashMap::new()),
             achievements: RefCell::new(HashMap::new()),
             quitting: Cell::new(false),
@@ -222,6 +226,22 @@ impl App {
         // umu fetches Proton in the middle of a launch; this is what makes that
         // visible instead of the game just taking longer.
         crate::ui::downloads::watch_proton(&this);
+        // A drive unplugged or plugged back in while Divine is open changes
+        // which games can be played, so the library follows it as it happens.
+        match crate::disk::mount_changes() {
+            Ok(changes) => {
+                let weak = Rc::downgrade(&this);
+                glib::spawn_future_local(async move {
+                    while changes.recv().await.is_ok() {
+                        let Some(app) = weak.upgrade() else {
+                            break;
+                        };
+                        app.recheck_folders();
+                    }
+                });
+            }
+            Err(e) => warn!("cannot watch drives come and go: {e:#}"),
+        }
         let weak = Rc::downgrade(&this);
         application.connect_shutdown(move |_| {
             if let Some(app) = weak.upgrade() {
@@ -1033,6 +1053,7 @@ impl App {
         while let Some(child) = self.flow.first_child() {
             self.flow.remove(&child);
         }
+        *self.missing.borrow_mut() = missing_folders(&self.games.borrow());
         for game in self.games.borrow().iter() {
             self.flow.append(&game_card::build(game));
         }
@@ -1040,6 +1061,30 @@ impl App {
         // here; refilter picks which of the three pages takes its place.
         self.stack.set_visible_child_name("library");
         self.refilter();
+    }
+
+    /// Redraws what a drive coming or going changed: the tile of each game whose
+    /// folder appeared or vanished, and its page if that is the one showing.
+    /// Everything else stays as it is, scroll position included.
+    fn recheck_folders(self: &Rc<Self>) {
+        let now = missing_folders(&self.games.borrow());
+        let before = self.missing.replace(now.clone());
+        let flipped: HashSet<&String> = now.symmetric_difference(&before).collect();
+        if flipped.is_empty() {
+            return;
+        }
+        for (index, game) in self.games.borrow().iter().enumerate() {
+            if !flipped.contains(&game.app_name) {
+                continue;
+            }
+            if let Some(tile) = self.flow.child_at_index(index as i32) {
+                tile.set_child(Some(&game_card::build(game)));
+            }
+        }
+        let showing = self.nav.visible_page().and_then(|page| page.tag());
+        if showing.is_some_and(|tag| flipped.contains(&tag.to_string())) {
+            self.rebuild_game_page();
+        }
     }
 
     /// Imports games installed through a system legendary or through Heroic.
@@ -1122,6 +1167,14 @@ impl App {
             .build();
         about.present(Some(&self.window));
     }
+}
+
+fn missing_folders(games: &[Game]) -> HashSet<String> {
+    games
+        .iter()
+        .filter(|game| game.folder_missing())
+        .map(|game| game.app_name.clone())
+        .collect()
 }
 
 fn loading_page() -> gtk::Widget {

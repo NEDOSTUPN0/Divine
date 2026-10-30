@@ -313,9 +313,16 @@ fn saves_summary(events: &[String]) -> String {
 }
 
 pub(super) fn confirm_uninstall(app: &Rc<App>, game: &Game) {
+    let missing = game.folder_missing();
     let dialog = adw::AlertDialog::new(
         Some(&format!("Uninstall {}?", game.title)),
-        Some("The game files are deleted. Saves kept by Epic in the cloud are not touched."),
+        Some(if missing {
+            "Its folder cannot be found, so nothing is deleted: the game is only \
+             marked as not installed. Files on a drive that is not connected stay \
+             there and can be imported again."
+        } else {
+            "The game files are deleted. Saves kept by Epic in the cloud are not touched."
+        }),
     );
     dialog.add_response("cancel", "Cancel");
     dialog.add_response("uninstall", "Uninstall");
@@ -336,7 +343,13 @@ pub(super) fn confirm_uninstall(app: &Rc<App>, game: &Game) {
         let lgd = app.lgd.borrow().clone();
         let weak = Rc::downgrade(&app);
         spawn_bg(
-            move || lgd.uninstall(&app_name),
+            move || {
+                if missing {
+                    lgd.forget(&app_name)
+                } else {
+                    lgd.uninstall(&app_name)
+                }
+            },
             move |result| {
                 let Some(app) = weak.upgrade() else {
                     return;

@@ -1007,6 +1007,13 @@ fn finish(app: &Rc<App>, job: &Rc<Job>, result: anyhow::Result<InstallEnd>) {
 
 fn toggle_pause(app: &Rc<App>, job: &Rc<Job>) {
     if job.paused.get() {
+        if lost_destination(app, job) {
+            app.toast(&format!(
+                "The folder for {} cannot be found. Connect the drive it is on, then resume.",
+                job.title
+            ));
+            return;
+        }
         if job.unknown_tags.get() {
             resolve_tags(app, job);
         } else {
@@ -1154,6 +1161,30 @@ fn install_base(app: &Rc<App>, job: &Job) -> PathBuf {
         Some(path) => PathBuf::from(path),
         None => app.cfg.borrow().general.install_dir.clone(),
     }
+}
+
+/// Whether carrying on would write somewhere the job's folder no longer is,
+/// as when the drive it was on has been unplugged.
+///
+/// legendary trusts its resume file over the disk, so an install resumed into
+/// an empty mount point fetches only the files still to come and records the
+/// game as complete. An update does the same with or without a resume file,
+/// since legendary only checks that it may write next to the folder, and a
+/// repair writes into the same place. A first install with no resume file yet has written nothing, and creating
+/// its folder is legendary's to do.
+fn lost_destination(app: &Rc<App>, job: &Job) -> bool {
+    let Some(mode) = job.kind.mode() else {
+        return false;
+    };
+    if matches!(mode, InstallMode::Fresh { .. }) {
+        let lgd = app.lgd.borrow();
+        return lgd.can_resume(&job.app_name) && !install_base(app, job).is_dir();
+    }
+    app.games
+        .borrow()
+        .iter()
+        .find(|game| game.app_name == job.app_name)
+        .is_some_and(Game::folder_missing)
 }
 
 /// Where a half-finished download is sitting, if it is there at all.

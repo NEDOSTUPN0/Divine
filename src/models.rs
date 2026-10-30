@@ -1,6 +1,7 @@
 //! Shapes of legendary's JSON output and the merged library entry the UI uses.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Deserialize;
 
@@ -232,6 +233,16 @@ impl Game {
         self.installed.is_some()
     }
 
+    /// Installed, but its folder is not there: a drive that is not mounted, or a
+    /// folder removed by hand. legendary never checks, so the game stays
+    /// installed as far as it knows, and an update run now would write into an
+    /// empty mount point on whatever disk lies underneath.
+    pub fn folder_missing(&self) -> bool {
+        self.installed
+            .as_ref()
+            .is_some_and(|installed| !Path::new(&installed.install_path).is_dir())
+    }
+
     /// Epic hands over an entitlement rather than files, so there is nothing
     /// here to download.
     pub fn is_partner_hosted(&self) -> bool {
@@ -387,6 +398,32 @@ mod tests {
         assert!(games[0].dlcs[0].installed);
         // The base game itself is not installed, only its add-on is.
         assert!(!games[0].is_installed());
+    }
+
+    #[test]
+    fn a_game_on_a_drive_that_is_gone_says_so() {
+        let list: Vec<ListEntry> = serde_json::from_str(LIST).expect("valid list");
+        let here = std::env::temp_dir();
+        let installed = |path: &Path| InstalledEntry {
+            app_name: "8935bb3e".into(),
+            title: "Alien: Isolation".into(),
+            install_path: path.display().to_string(),
+            version: "1".into(),
+            install_size: 1,
+            install_tags: Vec::new(),
+        };
+
+        let present = merge(list.clone(), vec![installed(&here)]);
+        assert!(!present[0].folder_missing());
+
+        let gone = merge(
+            list.clone(),
+            vec![installed(&here.join("divine-unmounted-drive"))],
+        );
+        assert!(gone[0].folder_missing());
+
+        let never_installed = merge(list, Vec::new());
+        assert!(!never_installed[0].folder_missing());
     }
 
     /// Searching by studio is the whole point of matching the developer: not
