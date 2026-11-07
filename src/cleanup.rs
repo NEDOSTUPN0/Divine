@@ -107,6 +107,9 @@ fn sweep_store(dir: &Path, games: &[Game], sweep: &mut Sweep) -> Vec<PathBuf> {
 /// Screenshots are filed under their URL, so what is still wanted is whatever
 /// the surviving store pages point at. A page whose screenshots Epic has
 /// swapped out leaves the old ones behind, and this is what collects them.
+///
+/// Trailer posters live here too, and so does a frame cut from a trailer that
+/// came without one, filed under the trailer's own URL.
 fn sweep_screenshots(dir: &Path, pages: &[PathBuf], sweep: &mut Sweep) {
     let mut keep: HashSet<String> = HashSet::new();
     for page in pages {
@@ -118,7 +121,11 @@ fn sweep_screenshots(dir: &Path, pages: &[PathBuf], sweep: &mut Sweep) {
             // are called unused on its account.
             return;
         };
-        for url in &about.screenshots {
+        let posters = about
+            .videos
+            .iter()
+            .flat_map(|clip| [&clip.poster, &clip.url]);
+        for url in about.screenshots.iter().chain(posters) {
             keep.insert(crate::covers::screenshot_name(url));
         }
     }
@@ -381,6 +388,44 @@ mod tests {
 
         assert!(sweep.is_empty());
         assert!(shot.exists());
+
+        fs::remove_dir_all(&pages).unwrap();
+        fs::remove_dir_all(&shots).unwrap();
+    }
+
+    /// A trailer's poster, and the frame standing in for a missing one, are
+    /// filed with the screenshots and have to be kept the same way.
+    #[test]
+    fn a_trailer_keeps_its_poster_through_the_sweep() {
+        let pages = scratch("trailer-pages");
+        let shots = scratch("trailer-shots");
+        let poster = "https://media-cdn.epicgames.com/8db6/8db6-00001-thumb.png";
+        let trailer = "https://epic-games-store-cdn.qstv.on.epicgames.com/output/1530/output.mp4";
+        let page = plant(&pages, "peony.json", 0);
+        let about = crate::epic::store::About {
+            videos: vec![
+                crate::epic::store::Clip {
+                    url: "https://media-cdn.epicgames.com/8db6/8db6.m3u8".into(),
+                    poster: poster.into(),
+                },
+                crate::epic::store::Clip {
+                    url: trailer.into(),
+                    poster: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        fs::write(&page, serde_json::to_string(&about).unwrap()).unwrap();
+        let named = |url: &str| format!("{}.img", crate::covers::screenshot_name(url));
+        let kept_poster = plant(&shots, &named(poster), 30);
+        let kept_frame = plant(&shots, &named(trailer), 40);
+        let stale = plant(&shots, "0123456789abcdef.img", 50);
+
+        let mut sweep = Sweep::default();
+        sweep_screenshots(&shots, &[page], &mut sweep);
+
+        assert_eq!(sweep.files, vec![stale]);
+        assert!(kept_poster.exists() && kept_frame.exists());
 
         fs::remove_dir_all(&pages).unwrap();
         fs::remove_dir_all(&shots).unwrap();

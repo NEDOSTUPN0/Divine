@@ -384,23 +384,29 @@ fn fill_media(app: &Rc<App>, shots: &Shots, store: &crate::epic::store::About) {
 
 /// One picture in the carousel, fetched and cached like any other.
 fn still(app: &Rc<App>, url: &str) -> gtk::Picture {
+    let url = url.to_string();
+    still_from(app, move || crate::covers::fetch_screenshot(&url))
+}
+
+/// A picture in the carousel, from wherever `fetch` gets it, off the main
+/// thread.
+fn still_from(
+    app: &Rc<App>,
+    fetch: impl FnOnce() -> anyhow::Result<std::path::PathBuf> + Send + 'static,
+) -> gtk::Picture {
     let picture = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
         .height_request(240)
         .build();
     picture.add_css_class("card");
 
-    let url = url.to_string();
     let weak = Rc::downgrade(app);
     let target = picture.clone();
-    spawn_bg(
-        move || crate::covers::fetch_screenshot(&url),
-        move |result| {
-            if let (Ok(path), Some(_)) = (result, weak.upgrade()) {
-                target.set_filename(Some(&path));
-            }
-        },
-    );
+    spawn_bg(fetch, move |result| {
+        if let (Ok(path), Some(_)) = (result, weak.upgrade()) {
+            target.set_filename(Some(&path));
+        }
+    });
     picture
 }
 
@@ -413,7 +419,15 @@ fn still(app: &Rc<App>, url: &str) -> gtk::Picture {
 /// page is left. A paused pipeline still holds a decoder and its share of video
 /// memory, which is not something to leave behind on the way out.
 fn trailer_page(app: &Rc<App>, shots: &Shots, clip: &crate::epic::store::Clip) -> gtk::Overlay {
-    let poster = still(app, &clip.poster);
+    // The store autoplays some trailers and gives those no poster, so one is
+    // cut from the trailer itself rather than leaving an empty card.
+    let poster = match clip.poster.as_str() {
+        "" => {
+            let url = clip.url.clone();
+            still_from(app, move || video::poster_frame(&url))
+        }
+        poster => still(app, poster),
+    };
     let page = gtk::Overlay::builder().child(&poster).build();
 
     let picture = gtk::Picture::builder()

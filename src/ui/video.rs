@@ -6,15 +6,19 @@
 //! `gtk4paintablesink`, which turns them into a [`gdk::Paintable`] that any
 //! [`gtk::Picture`] can show.
 //!
-//! The trailers are ordinary MP4 over HTTPS and the server takes range
-//! requests, so nothing is downloaded ahead of time: the pipeline pulls the
-//! parts it needs as it plays. Hardware decoding is GStreamer's own decision —
+//! The trailers are either MP4 over HTTPS, which the server serves in ranges,
+//! or HLS and DASH streams, which hlsdemux2 and dashdemux2 from
+//! gst-plugins-good follow. Nothing is downloaded ahead of time either way:
+//! the pipeline pulls the parts it needs as it plays. Hardware decoding is GStreamer's own decision —
 //! it takes whatever decoder the machine has and falls back to software.
 //!
 //! Everything here degrades to nothing. A machine without the plugin gets no
 //! player and the page shows what it always showed.
 
-use anyhow::{Context, Result};
+use std::fs;
+use std::path::PathBuf;
+
+use anyhow::{bail, Context, Result};
 use gst::prelude::*;
 use gtk::{gdk, glib};
 
@@ -45,17 +49,7 @@ impl Player {
             .build()
             .context("building the pipeline")?;
 
-        // souphttpsrc fetches the trailer, and takes its proxy from here
-        // rather than from anything Divine's own requests go through.
-        if let Some(relay) = crate::relay::address() {
-            pipeline.connect("source-setup", false, move |values| {
-                let source = values.get(1)?.get::<gst::Element>().ok()?;
-                if source.has_property("proxy") {
-                    source.set_property("proxy", &relay);
-                }
-                None
-            });
-        }
+        follow_proxy(&pipeline);
 
         // Paused rather than playing: this fills the first frame in, so the
         // widget shows the trailer's own opening rather than a black square.
@@ -148,6 +142,123 @@ impl Drop for Player {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
     }
+}
+
+/// souphttpsrc fetches the trailer, and takes its proxy from here rather than
+/// from anything Divine's own requests go through.
+fn follow_proxy(pipeline: &gst::Element) {
+    if let Some(relay) = crate::relay::address() {
+        pipeline.connect("source-setup", false, move |values| {
+            let source = values.get(1)?.get::<gst::Element>().ok()?;
+            if source.has_property("proxy") {
+                source.set_property("proxy", &relay);
+            }
+            None
+        });
+    }
+}
+
+/// How long opening a trailer or finding a frame in it may take before the
+/// poster is given up on.
+const FRAME_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(20);
+
+/// How far into a trailer its stand-in poster is taken from. Trailers tend to
+/// open on black or on a publisher's logo, and a few seconds in is past both.
+const FRAME_AT: gst::ClockTime = gst::ClockTime::from_seconds(5);
+
+/// A poster for a trailer the store gave none, cut from the trailer itself and
+/// kept beside the screenshots under the trailer's URL. Blocking: it opens the
+/// stream, which means a request or two and the start of the file.
+pub fn poster_frame(url: &str) -> Result<PathBuf> {
+    let dir = crate::covers::screenshots_dir();
+    let path = dir.join(format!("{}.img", crate::covers::screenshot_name(url)));
+    if path.is_file() {
+        return Ok(path);
+    }
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    let image = grab_frame(url).context("taking a frame from the trailer")?;
+    // Written aside and moved into place, so a page opened halfway through
+    // never takes half a picture for the whole one.
+    let part = path.with_extension("part");
+    fs::write(&part, image).with_context(|| format!("writing {}", part.display()))?;
+    fs::rename(&part, &path).with_context(|| format!("moving {} into place", path.display()))?;
+    Ok(path)
+}
+
+/// One frame of `url`, as a JPEG.
+///
+/// playbin3 opens it into sinks that throw everything away, and `convert-sample`
+/// hands back the frame the video sink was last given, encoded as asked. The
+/// video sink asks for plain `video/x-raw`: a sink that takes anything lets a
+/// hardware decoder keep its frames in GPU memory, as NVIDIA's does in CUDA,
+/// and the conversion cannot read them out of there.
+fn grab_frame(url: &str) -> Result<Vec<u8>> {
+    gst::init().context("starting GStreamer")?;
+    let video_sink =
+        gst::parse::bin_from_description("capsfilter caps=video/x-raw ! fakesink sync=false", true)
+            .context("building the video sink")?;
+    let audio_sink = gst::ElementFactory::make("fakesink")
+        .property("sync", false)
+        .build()
+        .context("building the audio sink")?;
+    let pipeline = gst::ElementFactory::make("playbin3")
+        .property("uri", url)
+        .property("video-sink", &video_sink)
+        .property("audio-sink", &audio_sink)
+        .build()
+        .context("building the pipeline")?;
+    follow_proxy(&pipeline);
+    let frame = settle_and_grab(&pipeline);
+    let _ = pipeline.set_state(gst::State::Null);
+    frame
+}
+
+fn settle_and_grab(pipeline: &gst::Element) -> Result<Vec<u8>> {
+    pipeline
+        .set_state(gst::State::Paused)
+        .context("opening the trailer")?;
+    settle(pipeline)?;
+
+    // A trailer shorter than that is shown from its middle.
+    let at = match pipeline.query_duration::<gst::ClockTime>() {
+        Some(length) if length < FRAME_AT * 2 => length / 2,
+        _ => FRAME_AT,
+    };
+    pipeline
+        .seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, at)
+        .context("seeking into the trailer")?;
+    settle(pipeline)?;
+
+    let caps = gst::Caps::builder("image/jpeg").build();
+    let sample = pipeline
+        .emit_by_name::<Option<gst::Sample>>("convert-sample", &[&caps])
+        .context("the trailer gave no frame")?;
+    let buffer = sample.buffer().context("the frame is empty")?;
+    let map = buffer.map_readable().context("reading the frame")?;
+    Ok(map.as_slice().to_vec())
+}
+
+/// Waits for the pipeline to finish what it was last asked to do.
+fn settle(pipeline: &gst::Element) -> Result<()> {
+    let (result, _, _) = pipeline.state(FRAME_TIMEOUT);
+    match result {
+        Ok(gst::StateChangeSuccess::Success | gst::StateChangeSuccess::NoPreroll) => Ok(()),
+        Ok(gst::StateChangeSuccess::Async) => bail!("the trailer took too long to open"),
+        Err(_) => bail!("the trailer would not open: {}", bus_error(pipeline)),
+    }
+}
+
+/// What went wrong, as GStreamer told its bus.
+fn bus_error(pipeline: &gst::Element) -> String {
+    pipeline
+        .bus()
+        .and_then(|bus| bus.pop_filtered(&[gst::MessageType::Error]))
+        .and_then(|message| match message.view() {
+            gst::MessageView::Error(e) => Some(e.error().to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "no reason given".into())
 }
 
 /// Whether trailers can be played at all. False on a machine without the

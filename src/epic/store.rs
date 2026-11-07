@@ -99,7 +99,7 @@ const WARM_PAUSE: Duration = Duration::from_millis(300);
 /// Bumped whenever this file starts reading more out of the store than before.
 /// Serde fills anything new with defaults, so without a version a cache written
 /// by an older build looks complete and quietly hides the new blocks.
-const CACHE_VERSION: u32 = 5;
+const CACHE_VERSION: u32 = 6;
 /// Folds the store's flat language list into the sections it actually means.
 ///
 /// A `Kind:` prefix opens a section and every bare line after it belongs to
@@ -261,7 +261,8 @@ impl About {
     }
 }
 
-/// One trailer: the file to play, and the frame to show until it is played.
+/// One trailer: the file or stream to play, and the frame to show until it is
+/// played. The frame can be missing; see [`carousel_clip`].
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Clip {
     pub url: String,
@@ -700,6 +701,13 @@ fn fetch(slug: &str) -> Result<About> {
     struct CarouselItem {
         #[serde(default)]
         image: Image,
+        #[serde(default)]
+        video: Option<RawVideo>,
+    }
+    #[derive(Deserialize)]
+    struct RawVideo {
+        #[serde(default)]
+        recipes: String,
     }
     #[derive(Default, Deserialize)]
     struct Image {
@@ -764,14 +772,17 @@ fn fetch(slug: &str) -> Result<About> {
     };
     let data = page.data;
 
-    // Carousel entries without an image are videos, which are no use here.
-    let screenshots = data
-        .carousel
-        .items
-        .into_iter()
-        .map(|item| item.image.src)
-        .filter(|src| !src.is_empty())
-        .collect();
+    // Every entry carries both an image and a video; an empty image is what
+    // marks the ones that are trailers.
+    let mut screenshots = Vec::new();
+    let mut videos = Vec::new();
+    for item in data.carousel.items {
+        if !item.image.src.is_empty() {
+            screenshots.push(item.image.src);
+        } else if let Some(clip) = item.video.and_then(|video| carousel_clip(&video.recipes)) {
+            videos.push(clip);
+        }
+    }
 
     let requirements = data
         .requirements
@@ -803,9 +814,7 @@ fn fetch(slug: &str) -> Result<About> {
         short: data.about.short_description,
         long: data.about.description,
         screenshots,
-        // The trailers on these pages are behind a media service that no
-        // longer answers for them, so only the newer pages have any.
-        videos: Vec::new(),
+        videos,
         tags: data.meta.tags.iter().map(|tag| words(tag)).collect(),
         links: links(&data.social_links),
         requirements,
@@ -815,6 +824,54 @@ fn fetch(slug: &str) -> Result<About> {
         age_rating,
         age_descriptors,
         version: 0,
+    })
+}
+
+/// A trailer from a store page's carousel, out of its `recipes`: JSON inside a
+/// string, in one of two shapes, both on GTA V's page.
+///
+/// A QuickSilver video lists its files outright, an MP4 among them, and says
+/// nothing of a poster. Anything newer comes from the media service: per
+/// language, one entry per encoding, each with a manifest and a thumbnail and
+/// no MP4 at all. HLS goes first, then DASH in fragmented MP4. GStreamer plays
+/// both, while the WebM encoding fails in dashdemux2 to fetch its fragments.
+fn carousel_clip(recipes: &str) -> Option<Clip> {
+    use serde_json::Value;
+
+    let recipes: Value = serde_json::from_str(recipes).ok()?;
+    if let Some(files) = recipes.get("output").and_then(Value::as_array) {
+        let mp4 = files
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|url| url.ends_with(".mp4"))?;
+        return Some(Clip {
+            url: mp4.to_string(),
+            poster: String::new(),
+        });
+    }
+
+    // The page is asked for in English, so its own language is the one to
+    // look for; a video recorded for one other language only is still a video.
+    let encodings = recipes
+        .get("en-US")
+        .or_else(|| recipes.as_object()?.values().next())?
+        .as_array()?;
+    ["video-hls", "video-fmp4"].iter().find_map(|wanted| {
+        let encoding = encodings
+            .iter()
+            .find(|encoding| encoding["recipe"] == *wanted)?;
+        let output = |key: &str| {
+            encoding["outputs"]
+                .as_array()?
+                .iter()
+                .find(|output| output["key"] == key)?["url"]
+                .as_str()
+                .map(str::to_string)
+        };
+        Some(Clip {
+            url: output("manifest")?,
+            poster: output("thumbnail").unwrap_or_default(),
+        })
     })
 }
 
@@ -1032,5 +1089,67 @@ mod tests {
             "fallout-3-game-of-the-year-edition"
         );
         assert_eq!(super::slug_from_title("Among Us"), "among-us");
+    }
+
+    /// GTA V's carousel, trimmed: its QuickSilver trailer, and a newer one
+    /// whose encodings come WebM and DASH first, the way the page lists them.
+    #[test]
+    fn a_carousel_trailer_plays_from_mp4_or_hls() {
+        let quicksilver = serde_json::json!({
+            "videoId": "153077cc-4981-4c99-bc2b-9e9f2b6dffa4",
+            "output": [
+                "https://epic-games-store-cdn.qstv.on.epicgames.com/output/153077cc-4981-4c99-bc2b-9e9f2b6dffa4/main_playlist_dash.mpd",
+                "https://epic-games-store-cdn.qstv.on.epicgames.com/output/153077cc-4981-4c99-bc2b-9e9f2b6dffa4/output.mp4",
+            ],
+            "quicksilver": true,
+        });
+        let clip = super::carousel_clip(&quicksilver.to_string()).expect("a trailer");
+        assert!(clip.url.ends_with("/output.mp4"));
+        assert!(clip.poster.is_empty());
+
+        let encoding = |recipe: &str, manifest: &str| {
+            serde_json::json!({
+                "recipe": recipe,
+                "outputs": [
+                    { "contentType": "application/dash+xml", "key": "manifest", "url": manifest },
+                    { "contentType": "image/png", "key": "thumbnail",
+                      "url": format!("{manifest}-00001-thumb.png") },
+                ],
+            })
+        };
+        let media = serde_json::json!({
+            "en-US": [
+                encoding("video-webm", "https://media-cdn.epicgames.com/d3a6/d3a6.mpd"),
+                encoding("video-fmp4", "https://media-cdn.epicgames.com/338d/338d.mpd"),
+                encoding("video-hls", "https://media-cdn.epicgames.com/bf3c/bf3c.m3u8"),
+            ]
+        });
+        let clip = super::carousel_clip(&media.to_string()).expect("a trailer");
+        assert_eq!(clip.url, "https://media-cdn.epicgames.com/bf3c/bf3c.m3u8");
+        assert_eq!(
+            clip.poster,
+            "https://media-cdn.epicgames.com/bf3c/bf3c.m3u8-00001-thumb.png"
+        );
+
+        // Without HLS, the fragmented MP4 one; never the WebM.
+        let no_hls = serde_json::json!({
+            "en-US": [
+                encoding("video-webm", "https://media-cdn.epicgames.com/d3a6/d3a6.mpd"),
+                encoding("video-fmp4", "https://media-cdn.epicgames.com/338d/338d.mpd"),
+            ]
+        });
+        assert_eq!(
+            super::carousel_clip(&no_hls.to_string())
+                .expect("a trailer")
+                .url,
+            "https://media-cdn.epicgames.com/338d/338d.mpd"
+        );
+        let webm_only = serde_json::json!({
+            "en-US": [encoding("video-webm", "https://media-cdn.epicgames.com/d3a6/d3a6.mpd")]
+        });
+        assert!(super::carousel_clip(&webm_only.to_string()).is_none());
+
+        // A picture's entry carries a video with no recipes at all.
+        assert!(super::carousel_clip("").is_none());
     }
 }
