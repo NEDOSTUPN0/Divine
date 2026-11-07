@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use crate::config::{self, Config, LATEST_GE_PROTON};
 use crate::log::{error, warn};
 use crate::models::Game;
-use crate::umu;
+use crate::{gamescope, umu};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerKind {
@@ -264,7 +264,7 @@ pub fn installed(binary: &str) -> bool {
 fn require(binary: &str) -> bool {
     let found = installed(binary);
     if !found {
-        warn!("{binary} is switched on but not installed, skipping it");
+        warn!("{binary} is asked for but not installed, leaving it out");
     }
     found
 }
@@ -280,12 +280,17 @@ const GAMEMODE_PRELOAD: [&str; 2] = ["env", "LD_PRELOAD=libgamemodeauto.so.0:lib
 /// Everything the launch runs under ahead of umu or Proton. The launch options'
 /// own wrappers come first, since `%command%` stands for all the rest, then the
 /// switches. `present` is [`require`], handed in so a test needs no PATH.
+///
+/// gamescope sits inside GameMode, so GameMode covers all of it, and outside
+/// MangoHud, which has to hook the game rather than gamescope. With mangoapp at
+/// hand gamescope draws the overlay itself instead, which is what its own help
+/// asks for.
 fn wrappers(
     cfg: &Config,
     per_game: &crate::config::GameSettings,
     own: Vec<String>,
     present: impl Fn(&str) -> bool,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let mut wrapper = Vec::new();
     // Typed by hand, gamemoderun would hit the same container as the switch
     // does, so it gets the same preload. The switch then has nothing to add.
@@ -305,10 +310,16 @@ fn wrappers(
         wrapper.push(GAMEMODE.into());
         wrapper.extend(GAMEMODE_PRELOAD.map(String::from));
     }
-    if per_game.mangohud.unwrap_or(cfg.runner.mangohud) && present(MANGOHUD) {
+    let mut mangohud = per_game.mangohud.unwrap_or(cfg.runner.mangohud) && present(MANGOHUD);
+    if per_game.gamescope.enabled && present(gamescope::BINARY) {
+        let mangoapp = mangohud && present(gamescope::MANGOAPP);
+        wrapper.extend(gamescope::command(&per_game.gamescope, mangoapp)?);
+        mangohud &= !mangoapp;
+    }
+    if mangohud {
         wrapper.push(MANGOHUD.into());
     }
-    wrapper
+    Ok(wrapper)
 }
 
 /// The Proton build a game runs on: its own choice, or the global one.
@@ -321,9 +332,13 @@ fn proton_setting(cfg: &Config, per_game: &crate::config::GameSettings) -> Strin
 }
 
 /// The switches Proton reads out of the environment, worked out from the
-/// settings alone. Split out because two of the rules are easy to get backwards
-/// and neither is visible from the variable names.
-fn tuning(cfg: &Config, per_game: &crate::config::GameSettings) -> Vec<(String, String)> {
+/// settings alone. Split out because three of the rules are easy to get
+/// backwards and none is visible from the variable names.
+fn tuning(
+    cfg: &Config,
+    per_game: &crate::config::GameSettings,
+    in_gamescope: bool,
+) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
 
     // Proton turns all three on by itself; the environment only carries the
@@ -345,6 +360,19 @@ fn tuning(cfg: &Config, per_game: &crate::config::GameSettings) -> Vec<(String, 
         if !enabled {
             env.push((key.into(), "1".into()));
         }
+    }
+
+    // gamescope hands the game an X display of its own and no WAYLAND_DISPLAY,
+    // and both GE-Proton and CachyOS only switch to winewayland when that is
+    // set, so the Wayland switch has nothing to act on in there. HDR goes
+    // through gamescope instead, which sets up its WSI layer for the game, and
+    // only DXVK has to be told. Straight away: GE-Proton turns PROTON_ENABLE_HDR
+    // into this very variable, but CachyOS's script never reads it.
+    if in_gamescope {
+        if per_game.gamescope.hdr {
+            env.push(("DXVK_HDR".into(), "1".into()));
+        }
+        return env;
     }
 
     // Proton only acts on this when a Wayland session is actually there, and HDR
@@ -454,9 +482,11 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
 
     let options = crate::launch_options::parse(&per_game.launch_options)
         .context("reading the launch options")?;
-    let mut wrapper = wrappers(cfg, &per_game, options.wrapper, require);
+    let mut wrapper = wrappers(cfg, &per_game, options.wrapper, require)?;
 
-    let mut env = tuning(cfg, &per_game);
+    // Asked quietly: the wrappers above already warned if it is missing.
+    let in_gamescope = gamescope::in_use(&per_game.gamescope);
+    let mut env = tuning(cfg, &per_game, in_gamescope);
 
     // Anti-cheat runtimes are per game, and Proton reads them straight from the
     // environment. Downloading here covers a runtime that went missing after it
@@ -665,11 +695,11 @@ mod tests {
         cfg.runner.esync = true;
         cfg.runner.fsync = true;
         cfg.runner.ntsync = true;
-        assert!(tuning(&cfg, &GameSettings::default()).is_empty());
+        assert!(tuning(&cfg, &GameSettings::default(), false).is_empty());
 
         cfg.runner.fsync = false;
         assert_eq!(
-            tuning(&cfg, &GameSettings::default()),
+            tuning(&cfg, &GameSettings::default(), false),
             vec![("PROTON_NO_FSYNC".to_string(), "1".to_string())]
         );
 
@@ -678,7 +708,7 @@ mod tests {
             fsync: Some(true),
             ..GameSettings::default()
         };
-        assert!(tuning(&cfg, &per_game).is_empty());
+        assert!(tuning(&cfg, &per_game, false).is_empty());
     }
 
     /// HDR goes through winewayland, so on X11 the variable does nothing and
@@ -692,11 +722,11 @@ mod tests {
         cfg.runner.hdr = true;
 
         cfg.runner.wayland = false;
-        assert!(tuning(&cfg, &GameSettings::default()).is_empty());
+        assert!(tuning(&cfg, &GameSettings::default(), false).is_empty());
 
         cfg.runner.wayland = true;
         assert_eq!(
-            tuning(&cfg, &GameSettings::default()),
+            tuning(&cfg, &GameSettings::default(), false),
             vec![
                 ("PROTON_ENABLE_WAYLAND".to_string(), "1".to_string()),
                 ("PROTON_ENABLE_HDR".to_string(), "1".to_string()),
@@ -715,7 +745,7 @@ mod tests {
         cfg.runner.mangohud = true;
         let options = crate::launch_options::parse("obs-gamecapture %command%").expect("parsing");
         assert_eq!(
-            wrappers(&cfg, &GameSettings::default(), options.wrapper, |_| true),
+            wrappers(&cfg, &GameSettings::default(), options.wrapper, |_| true).expect("building"),
             words(&["obs-gamecapture", "mangohud"])
         );
     }
@@ -736,13 +766,13 @@ mod tests {
         )
         .expect("parsing");
         assert_eq!(
-            wrappers(&cfg, &GameSettings::default(), options.wrapper, |_| true),
+            wrappers(&cfg, &GameSettings::default(), options.wrapper, |_| true).expect("building"),
             words(&preloaded)
         );
 
         // The switch alone builds the same thing under the bare name.
         assert_eq!(
-            wrappers(&cfg, &GameSettings::default(), Vec::new(), |_| true),
+            wrappers(&cfg, &GameSettings::default(), Vec::new(), |_| true).expect("building"),
             words(&[
                 "gamemoderun",
                 "env",
@@ -750,7 +780,86 @@ mod tests {
             ])
         );
         // And a switch for a tool that is not installed adds nothing.
-        assert!(wrappers(&cfg, &GameSettings::default(), Vec::new(), |_| false).is_empty());
+        assert!(
+            wrappers(&cfg, &GameSettings::default(), Vec::new(), |_| false)
+                .expect("building")
+                .is_empty()
+        );
+    }
+
+    fn with_gamescope() -> GameSettings {
+        GameSettings {
+            gamescope: crate::config::Gamescope {
+                enabled: true,
+                game_width: 1280,
+                game_height: 720,
+                ..Default::default()
+            },
+            ..GameSettings::default()
+        }
+    }
+
+    #[test]
+    fn gamescope_runs_inside_gamemode_and_around_mangohud() {
+        let mut cfg = config();
+        cfg.runner.gamemode = true;
+        cfg.runner.mangohud = true;
+        let no_mangoapp = |binary: &str| binary != gamescope::MANGOAPP;
+        assert_eq!(
+            wrappers(&cfg, &with_gamescope(), Vec::new(), no_mangoapp).expect("building"),
+            words(&[
+                "gamemoderun",
+                "env",
+                "LD_PRELOAD=libgamemodeauto.so.0:libgamemode.so.0",
+                "gamescope",
+                "-w",
+                "1280",
+                "-h",
+                "720",
+                "--",
+                "mangohud",
+            ])
+        );
+    }
+
+    #[test]
+    fn mangoapp_takes_over_from_mangohud_under_gamescope() {
+        let mut cfg = config();
+        cfg.runner.mangohud = true;
+        assert_eq!(
+            wrappers(&cfg, &with_gamescope(), Vec::new(), |_| true).expect("building"),
+            words(&["gamescope", "-w", "1280", "-h", "720", "--mangoapp", "--"])
+        );
+    }
+
+    /// Inside gamescope the Wayland switch does nothing, and HDR must not wait
+    /// for it.
+    #[test]
+    fn hdr_inside_gamescope_needs_no_wayland() {
+        let mut cfg = config();
+        cfg.runner.wayland = true;
+        cfg.runner.hdr = true;
+        let mut per_game = with_gamescope();
+        assert!(tuning(&cfg, &per_game, true).is_empty());
+
+        per_game.gamescope.hdr = true;
+        assert_eq!(
+            tuning(&cfg, &per_game, true),
+            vec![("DXVK_HDR".to_string(), "1".to_string())]
+        );
+        // Without gamescope to carry it, the gamescope switch means nothing.
+        cfg.runner.wayland = false;
+        assert!(tuning(&cfg, &per_game, false).is_empty());
+    }
+
+    /// Switched on and then uninstalled: the game still starts, without it.
+    #[test]
+    fn a_missing_gamescope_is_left_out() {
+        let cfg = config();
+        let no_gamescope = |binary: &str| binary != gamescope::BINARY;
+        assert!(wrappers(&cfg, &with_gamescope(), Vec::new(), no_gamescope)
+            .expect("building")
+            .is_empty());
     }
 
     #[test]

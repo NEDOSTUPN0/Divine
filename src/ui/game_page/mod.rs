@@ -7,6 +7,7 @@
 mod achievements;
 mod collections;
 mod fixes;
+mod gamescope;
 mod install;
 mod launch;
 mod maintenance;

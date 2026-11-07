@@ -64,7 +64,7 @@ fn assignment(word: &str) -> Option<(String, String)> {
 }
 
 /// Word splitting as POSIX sh does it, without any of the expansions.
-fn split(line: &str) -> Result<Vec<String>> {
+pub fn split(line: &str) -> Result<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
     // Separate from `word` being empty: `''` is a word, and an empty one.

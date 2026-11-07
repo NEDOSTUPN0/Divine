@@ -247,8 +247,86 @@ pub struct GameSettings {
     pub gamemode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mangohud: Option<bool>,
-    /// Extra environment for the game. Kept last: TOML wants tables after values.
+    /// Extra environment for the game. This and the table below are kept
+    /// last: TOML wants tables after values.
     pub env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Gamescope::is_default")]
+    pub gamescope: Gamescope,
+}
+
+/// Running a game inside gamescope; see src/gamescope.rs. Per game only, like
+/// the launch options: a resolution is a choice about one game.
+///
+/// Zero and `None` leave a setting to gamescope, so Divine never passes a
+/// value nobody picked.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Gamescope {
+    pub enabled: bool,
+    /// What the game renders at.
+    pub game_width: u32,
+    pub game_height: u32,
+    /// The window gamescope opens, and what the game is scaled up to.
+    pub output_width: u32,
+    pub output_height: u32,
+    pub refresh_rate: u32,
+    pub window: GamescopeWindow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scaler: Option<GamescopeScaler>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<GamescopeFilter>,
+    /// 0 is the sharpest and 20 the softest, as gamescope counts it. Only
+    /// read with a filter that sharpens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sharpness: Option<u8>,
+    /// `--hdr-enabled`, and DXVK told to output HDR. Separate from the
+    /// global HDR switch, which goes through Wine Wayland and has no effect in
+    /// here.
+    pub hdr: bool,
+    pub grab_keyboard: bool,
+    /// Relative mouse movement all the time, for games whose camera spins
+    /// away when gamescope switches modes on them.
+    pub force_grab_cursor: bool,
+    /// Anything else gamescope takes, as one shell-style line.
+    pub extra_args: String,
+}
+
+impl Gamescope {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GamescopeWindow {
+    #[default]
+    Windowed,
+    Borderless,
+    Fullscreen,
+}
+
+/// How the game's frame is fitted into the window. The names are gamescope's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GamescopeScaler {
+    Auto,
+    Integer,
+    Fit,
+    Fill,
+    Stretch,
+}
+
+/// How the game's frame is resampled on the way up. The names are gamescope's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GamescopeFilter {
+    Linear,
+    Nearest,
+    Fsr,
+    Nis,
+    Pixel,
+    Sgsr,
 }
 
 /// The wrapper and the two runtimes as plain switches, the way Divine wrote
@@ -325,6 +403,7 @@ impl GameSettings {
             && !self.offline
             && !self.skip_update_check
             && self.env.is_empty()
+            && self.gamescope.is_default()
             && [
                 self.use_umu,
                 self.wayland,
@@ -702,6 +781,42 @@ mod tests {
         let written = toml::to_string_pretty(&cfg).expect("writing it back");
         assert!(written.contains("launch_options = \"-dx11 -windowed\""));
         assert!(!written.contains("args ="));
+    }
+
+    /// gamescope settings live in a table of their own inside the game's, and
+    /// one switched off with its values kept must come back with them.
+    #[test]
+    fn gamescope_settings_survive_the_round_trip() {
+        let mut cfg = Config::default();
+        let gamescope = Gamescope {
+            enabled: false,
+            game_width: 1280,
+            game_height: 720,
+            window: GamescopeWindow::Borderless,
+            filter: Some(GamescopeFilter::Fsr),
+            sharpness: Some(0),
+            extra_args: "--adaptive-sync".into(),
+            ..Gamescope::default()
+        };
+        cfg.set_game(
+            "Fowl",
+            GameSettings {
+                env: [("DXVK_HUD".to_string(), "fps".to_string())]
+                    .into_iter()
+                    .collect(),
+                gamescope: gamescope.clone(),
+                ..GameSettings::default()
+            },
+        );
+        let text = toml::to_string_pretty(&cfg).expect("writing config.toml");
+        let read: Config = toml::from_str(&text).expect("reading config.toml");
+        assert_eq!(read.game("Fowl").gamescope, gamescope);
+
+        // Untouched, it writes nothing, and the game stays out of the file.
+        cfg.set_game("Fowl", GameSettings::default());
+        assert!(!toml::to_string_pretty(&cfg)
+            .expect("writing config.toml")
+            .contains("gamescope"));
     }
 
     #[test]

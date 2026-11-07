@@ -13,6 +13,7 @@ mod covers;
 mod discord;
 mod disk;
 mod epic;
+mod gamescope;
 mod gamesdb;
 mod http;
 mod known_fixes;

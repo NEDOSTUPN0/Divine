@@ -12,6 +12,7 @@ use crate::models::{human_size, Game};
 use crate::runner::{self, Runner};
 use crate::ui::{spawn_bg, window::App, wrapping_list};
 
+use super::gamescope::gamescope_row;
 use super::launch::show_launch_command;
 use super::row;
 
@@ -22,13 +23,21 @@ use super::row;
 /// closed. Collecting on close meant every row had to be kept alive in one
 /// closure, and a session that ended any other way lost the lot.
 #[derive(Clone)]
-struct Writer {
+pub(super) struct Writer {
     app: std::rc::Weak<App>,
     app_name: String,
 }
 
 impl Writer {
-    fn set(&self, change: impl FnOnce(&mut GameSettings)) {
+    /// What is saved for the game right now.
+    pub(super) fn settings(&self) -> GameSettings {
+        self.app
+            .upgrade()
+            .map(|app| app.cfg.borrow().game(&self.app_name))
+            .unwrap_or_default()
+    }
+
+    pub(super) fn set(&self, change: impl FnOnce(&mut GameSettings)) {
         let Some(app) = self.app.upgrade() else {
             return;
         };
@@ -42,7 +51,7 @@ impl Writer {
         }
     }
 
-    fn switch(
+    pub(super) fn switch(
         &self,
         title: &str,
         subtitle: &str,
@@ -118,7 +127,7 @@ impl Writer {
 
     /// A text field, written when its apply button is pressed rather than on
     /// every keystroke: half a typed path or a half typed variable is neither.
-    fn entry(
+    pub(super) fn entry(
         &self,
         title: &str,
         text: &str,
@@ -308,18 +317,13 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
     );
     let wayland = write.override_row(
         "Wine Wayland",
-        "Experimental. Needs a Proton build that supports it: GE-Proton and CachyOS \
-         do, Valve's does not.",
+        WAYLAND_SUBTITLE,
         saved.wayland,
         |settings, value| settings.wayland = value,
     );
-    let hdr = write.override_row(
-        "HDR",
-        "Only reaches the game with Wine Wayland on, and needs a display and a \
-         Proton build that support it.",
-        saved.hdr,
-        |settings, value| settings.hdr = value,
-    );
+    let hdr = write.override_row("HDR", HDR_SUBTITLE, saved.hdr, |settings, value| {
+        settings.hdr = value
+    });
     let eos_overlay = write.override_row(
         "EOS Overlay",
         "Epic's in-game overlay, for the games that use Epic Online Services. \
@@ -329,22 +333,14 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         saved.eos_overlay,
         |settings, value| settings.eos_overlay = value,
     );
-    // Same as the global switch, except the answer can come from either level:
-    // the game's own override if it has one, the global setting otherwise.
     let global_wayland = app.cfg.borrow().runner.wayland;
-    let follow_wayland = {
-        let hdr = hdr.clone();
-        move |row: &adw::ComboRow| {
-            let enabled = match row.selected() {
-                1 => true,
-                2 => false,
-                _ => global_wayland,
-            };
-            hdr.set_sensitive(enabled);
-        }
-    };
-    follow_wayland(&wayland);
-    wayland.connect_selected_notify(follow_wayland);
+    follow_wayland(&write, &wayland, &hdr, global_wayland);
+    {
+        let (write, hdr) = (write.clone(), hdr.clone());
+        wayland.connect_selected_notify(move |wayland| {
+            follow_wayland(&write, wayland, &hdr, global_wayland);
+        });
+    }
 
     let weak = Rc::downgrade(app);
     let owned = game.clone();
@@ -406,6 +402,16 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         |settings, value| settings.esync = value,
     );
 
+    let dialog = adw::PreferencesDialog::builder().title(&game.title).build();
+    // The subpage is where gamescope is switched, so the two rows it takes over
+    // are looked at again whenever it closes.
+    let gamescope = {
+        let (writer, wayland, hdr) = (write.clone(), wayland.clone(), hdr.clone());
+        gamescope_row(&dialog, &write, move || {
+            follow_wayland(&writer, &wayland, &hdr, global_wayland);
+        })
+    };
+
     let launching = adw::PreferencesGroup::builder()
         .title("Launching")
         .description("Every setting here falls back to the global one unless changed")
@@ -419,6 +425,7 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         cloud_saves.upcast(),
         gamemode.upcast(),
         mangohud.upcast(),
+        gamescope.upcast(),
         fake_epic.upcast(),
         launch_options.upcast(),
     ] {
@@ -474,9 +481,41 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
     page.add(&anticheat);
     page.add(&advanced);
 
-    let dialog = adw::PreferencesDialog::builder().title(&game.title).build();
     dialog.add(&page);
     dialog.present(Some(&app.window));
+}
+
+const WAYLAND_SUBTITLE: &str = "Experimental. Needs a Proton build that supports it: GE-Proton \
+     and CachyOS do, Valve's does not.";
+const HDR_SUBTITLE: &str = "Only reaches the game with Wine Wayland on, and needs a display and \
+     a Proton build that support it.";
+
+/// HDR follows Wine Wayland, from the game's own override if it has one and the
+/// global switch otherwise. Inside gamescope neither does anything, so both are
+/// locked there, keeping their values for when gamescope is off again.
+fn follow_wayland(
+    write: &Writer,
+    wayland: &adw::ComboRow,
+    hdr: &adw::ComboRow,
+    global_wayland: bool,
+) {
+    let inside = crate::gamescope::in_use(&write.settings().gamescope);
+    let wayland_on = match wayland.selected() {
+        1 => true,
+        2 => false,
+        _ => global_wayland,
+    };
+    wayland.set_sensitive(!inside);
+    hdr.set_sensitive(!inside && wayland_on);
+    if inside {
+        wayland.set_subtitle(
+            "No effect inside gamescope, which gives the game an X display of its own",
+        );
+        hdr.set_subtitle("Inside gamescope, HDR is switched on in the Gamescope settings");
+    } else {
+        wayland.set_subtitle(WAYLAND_SUBTITLE);
+        hdr.set_subtitle(HDR_SUBTITLE);
+    }
 }
 
 /// Reference information, kept off the page itself.
