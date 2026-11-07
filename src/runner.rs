@@ -352,8 +352,12 @@ fn tuning(cfg: &Config, per_game: &crate::config::GameSettings) -> Vec<(String, 
     // XWayland. Heroic ties the two together the same way.
     if per_game.wayland.unwrap_or(cfg.runner.wayland) {
         env.push(("PROTON_ENABLE_WAYLAND".into(), "1".into()));
+        // DXVK_HDR as well, which is all GE-Proton's script turns
+        // PROTON_ENABLE_HDR into. CachyOS's script never reads the Proton
+        // variable, while its DXVK and winewayland both read this one.
         if per_game.hdr.unwrap_or(cfg.runner.hdr) {
             env.push(("PROTON_ENABLE_HDR".into(), "1".into()));
+            env.push(("DXVK_HDR".into(), "1".into()));
         }
     }
 
@@ -696,6 +700,7 @@ mod tests {
             vec![
                 ("PROTON_ENABLE_WAYLAND".to_string(), "1".to_string()),
                 ("PROTON_ENABLE_HDR".to_string(), "1".to_string()),
+                ("DXVK_HDR".to_string(), "1".to_string()),
             ]
         );
     }
