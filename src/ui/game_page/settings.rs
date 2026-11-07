@@ -385,6 +385,8 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         saved.mangohud,
         |settings, value| settings.mangohud = value,
     );
+    crate::ui::needs_tool(&gamemode, runner::GAMEMODE);
+    crate::ui::needs_tool(&mangohud, runner::MANGOHUD);
     let ntsync = write.override_row(
         "Ntsync",
         "Kernel side synchronisation",

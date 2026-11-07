@@ -203,6 +203,8 @@ pub fn show(app: &Rc<App>) {
         cfg.runner.mangohud,
         |cfg, on| cfg.runner.mangohud = on,
     );
+    crate::ui::needs_tool(&gamemode, crate::runner::GAMEMODE);
+    crate::ui::needs_tool(&mangohud, crate::runner::MANGOHUD);
 
     let steam_protons = switch(
         app,

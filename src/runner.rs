@@ -249,11 +249,20 @@ pub fn prefix_name(game: &Game) -> String {
     }
 }
 
+pub const GAMEMODE: &str = "gamemoderun";
+pub const MANGOHUD: &str = "mangohud";
+
+/// Whether a program is on Divine's own PATH. The settings ask this as well as
+/// the launch, so a row is locked exactly when the launch would skip its tool.
+pub fn installed(binary: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(binary).is_file()))
+}
+
 /// Wrapper tools are the distribution's to provide, and a switch left on for one
 /// that is not installed should not stop the game from starting.
 fn require(binary: &str) -> bool {
-    let found = std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(binary).is_file()));
+    let found = installed(binary);
     if !found {
         warn!("{binary} is switched on but not installed, skipping it");
     }
@@ -270,12 +279,12 @@ const GAMEMODE_PRELOAD: [&str; 2] = ["env", "LD_PRELOAD=libgamemodeauto.so.0:lib
 
 /// Everything the launch runs under ahead of umu or Proton. The launch options'
 /// own wrappers come first, since `%command%` stands for all the rest, then the
-/// switches. `installed` is [`require`], handed in so a test needs no PATH.
+/// switches. `present` is [`require`], handed in so a test needs no PATH.
 fn wrappers(
     cfg: &Config,
     per_game: &crate::config::GameSettings,
     own: Vec<String>,
-    installed: impl Fn(&str) -> bool,
+    present: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let mut wrapper = Vec::new();
     // Typed by hand, gamemoderun would hit the same container as the switch
@@ -284,7 +293,7 @@ fn wrappers(
     for word in own {
         let is_gamemode = Path::new(&word)
             .file_name()
-            .is_some_and(|name| name == "gamemoderun");
+            .is_some_and(|name| name == GAMEMODE);
         wrapper.push(word);
         if is_gamemode && !gamemode {
             wrapper.extend(GAMEMODE_PRELOAD.map(String::from));
@@ -292,12 +301,12 @@ fn wrappers(
         }
     }
 
-    if !gamemode && per_game.gamemode.unwrap_or(cfg.runner.gamemode) && installed("gamemoderun") {
-        wrapper.push("gamemoderun".into());
+    if !gamemode && per_game.gamemode.unwrap_or(cfg.runner.gamemode) && present(GAMEMODE) {
+        wrapper.push(GAMEMODE.into());
         wrapper.extend(GAMEMODE_PRELOAD.map(String::from));
     }
-    if per_game.mangohud.unwrap_or(cfg.runner.mangohud) && installed("mangohud") {
-        wrapper.push("mangohud".into());
+    if per_game.mangohud.unwrap_or(cfg.runner.mangohud) && present(MANGOHUD) {
+        wrapper.push(MANGOHUD.into());
     }
     wrapper
 }

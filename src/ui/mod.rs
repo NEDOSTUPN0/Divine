@@ -13,9 +13,9 @@ pub mod window;
 
 use std::rc::Rc;
 
+use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
-use gtk::prelude::*;
 
 use crate::ui::window::App;
 
@@ -42,6 +42,22 @@ pub fn ensure_eos_overlay(app: &Rc<App>) {
             }
         },
     );
+}
+
+/// Locks the row of a tool that is not installed, and says why.
+///
+/// Only the row is locked, never the value: a switch left on before the tool
+/// was removed stays on, so it is back as soon as the tool is, and until then
+/// the launch leaves the tool out by the same check.
+pub fn needs_tool(row: &impl IsA<adw::ActionRow>, binary: &str) {
+    if crate::runner::installed(binary) {
+        return;
+    }
+    let row = row.as_ref();
+    row.set_sensitive(false);
+    row.set_subtitle(&format!(
+        "{binary} is not installed, so games start without it"
+    ));
 }
 
 /// Gives a control the name assistive technology reads out.
