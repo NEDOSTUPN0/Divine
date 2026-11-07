@@ -6,6 +6,7 @@
 , gtk4
 , libadwaita
 , glib
+, glib-networking
 , gst_all_1
 , legendary-gl
 , umu-launcher
@@ -41,6 +42,10 @@ rustPlatform.buildRustPackage {
     gst_all_1.gst-plugins-bad
     gst_all_1.gst-plugins-rs
     gst_all_1.gst-libav
+    # TLS for GStreamer's HTTPS, which goes through GIO. wrapGAppsHook4 puts
+    # this first on GIO_EXTRA_MODULES, so a system TLS module built against
+    # another glibc cannot leave the trailers without one.
+    glib-networking
   ];
 
   postInstall = ''

@@ -45,6 +45,7 @@
             gst_all_1.gst-plugins-bad
             gst_all_1.gst-plugins-rs
             gst_all_1.gst-libav
+            glib-networking
           ];
 
           # Divine shells out to these, so the shell can drive the app end to end.
@@ -58,9 +59,14 @@
           DIVINE_EPIC_SHIM =
             "${pkgs.callPackage ./nix/epic-shim.nix { }}/EpicGamesLauncher.exe";
 
-          # So the window and the About dialog find the icon before it is installed.
+          # So the window and the About dialog find the icon before it is
+          # installed. And TLS for the trailers: GStreamer fetches them through
+          # GIO, and the system's own TLS module may be built against a newer
+          # glibc than this shell, in which case it does not load and no
+          # trailer opens at all.
           shellHook = ''
             export XDG_DATA_DIRS="$PWD/data''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+            export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
           '';
         };
       });
