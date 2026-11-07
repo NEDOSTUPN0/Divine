@@ -16,6 +16,7 @@ mod epic;
 mod gamesdb;
 mod http;
 mod known_fixes;
+mod launch_options;
 mod legendary;
 mod log;
 mod models;

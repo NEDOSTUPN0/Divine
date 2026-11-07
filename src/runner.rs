@@ -260,6 +260,48 @@ fn require(binary: &str) -> bool {
     found
 }
 
+/// gamemoderun preloads libgamemodeauto and points LD_LIBRARY_PATH at the client
+/// library it dlopens. umu's container replaces LD_LIBRARY_PATH, so that lookup
+/// fails and GameMode never engages, quietly. Preloading the client library too
+/// settles it: the dlopen matches an object that is already loaded, by soname,
+/// without searching any path. This takes over LD_PRELOAD, which is
+/// gamemoderun's to set anyway.
+const GAMEMODE_PRELOAD: [&str; 2] = ["env", "LD_PRELOAD=libgamemodeauto.so.0:libgamemode.so.0"];
+
+/// Everything the launch runs under ahead of umu or Proton. The launch options'
+/// own wrappers come first, since `%command%` stands for all the rest, then the
+/// switches. `installed` is [`require`], handed in so a test needs no PATH.
+fn wrappers(
+    cfg: &Config,
+    per_game: &crate::config::GameSettings,
+    own: Vec<String>,
+    installed: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut wrapper = Vec::new();
+    // Typed by hand, gamemoderun would hit the same container as the switch
+    // does, so it gets the same preload. The switch then has nothing to add.
+    let mut gamemode = false;
+    for word in own {
+        let is_gamemode = Path::new(&word)
+            .file_name()
+            .is_some_and(|name| name == "gamemoderun");
+        wrapper.push(word);
+        if is_gamemode && !gamemode {
+            wrapper.extend(GAMEMODE_PRELOAD.map(String::from));
+            gamemode = true;
+        }
+    }
+
+    if !gamemode && per_game.gamemode.unwrap_or(cfg.runner.gamemode) && installed("gamemoderun") {
+        wrapper.push("gamemoderun".into());
+        wrapper.extend(GAMEMODE_PRELOAD.map(String::from));
+    }
+    if per_game.mangohud.unwrap_or(cfg.runner.mangohud) && installed("mangohud") {
+        wrapper.push("mangohud".into());
+    }
+    wrapper
+}
+
 /// The Proton build a game runs on: its own choice, or the global one.
 fn proton_setting(cfg: &Config, per_game: &crate::config::GameSettings) -> String {
     if per_game.proton.is_empty() {
@@ -397,21 +439,9 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
 
     let proton_setting = proton_setting(cfg, &per_game);
 
-    let mut wrapper: Vec<String> = Vec::new();
-    if per_game.gamemode.unwrap_or(cfg.runner.gamemode) && require("gamemoderun") {
-        wrapper.push("gamemoderun".into());
-        // gamemoderun preloads libgamemodeauto and points LD_LIBRARY_PATH at the
-        // client library it dlopens. umu's container replaces LD_LIBRARY_PATH,
-        // so that lookup fails and GameMode never engages, quietly. Preloading
-        // the client library too settles it: the dlopen matches an object that
-        // is already loaded, by soname, without searching any path. This takes
-        // over LD_PRELOAD, which is gamemoderun's to set anyway.
-        wrapper.push("env".into());
-        wrapper.push("LD_PRELOAD=libgamemodeauto.so.0:libgamemode.so.0".into());
-    }
-    if per_game.mangohud.unwrap_or(cfg.runner.mangohud) && require("mangohud") {
-        wrapper.push("mangohud".into());
-    }
+    let options = crate::launch_options::parse(&per_game.launch_options)
+        .context("reading the launch options")?;
+    let mut wrapper = wrappers(cfg, &per_game, options.wrapper, require);
 
     let mut env = tuning(cfg, &per_game);
 
@@ -494,8 +524,10 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
         wrapper.push(install_shim(&drive_c)?);
     }
 
-    // Per-game variables go last so they can override anything set above.
+    // Per-game variables go last so they can override anything set above, and
+    // the launch options last of all, being the line typed most recently.
     env.extend(per_game.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    env.extend(options.env);
 
     let wrapper = wrapper.iter().map(|part| quote(part)).collect::<Vec<_>>();
     Ok((wrapper.join(" "), env))
@@ -657,6 +689,54 @@ mod tests {
                 ("PROTON_ENABLE_HDR".to_string(), "1".to_string()),
             ]
         );
+    }
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn hand_written_wrappers_run_outside_the_switches() {
+        let mut cfg = config();
+        cfg.runner.mangohud = true;
+        let options = crate::launch_options::parse("obs-gamecapture %command%").expect("parsing");
+        assert_eq!(
+            wrappers(&cfg, &GameSettings::default(), options.wrapper, |_| true),
+            words(&["obs-gamecapture", "mangohud"])
+        );
+    }
+
+    /// Without the preload GameMode never engages inside umu's container, and
+    /// nothing says so. Typing gamemoderun by hand must not lose it.
+    #[test]
+    fn gamemoderun_typed_by_hand_gets_the_preload_once() {
+        let mut cfg = config();
+        cfg.runner.gamemode = true;
+        let preloaded = [
+            "/run/current-system/sw/bin/gamemoderun",
+            "env",
+            "LD_PRELOAD=libgamemodeauto.so.0:libgamemode.so.0",
+        ];
+        let options = crate::launch_options::parse(
+            "/run/current-system/sw/bin/gamemoderun %command% -w 1080",
+        )
+        .expect("parsing");
+        assert_eq!(
+            wrappers(&cfg, &GameSettings::default(), options.wrapper, |_| true),
+            words(&preloaded)
+        );
+
+        // The switch alone builds the same thing under the bare name.
+        assert_eq!(
+            wrappers(&cfg, &GameSettings::default(), Vec::new(), |_| true),
+            words(&[
+                "gamemoderun",
+                "env",
+                "LD_PRELOAD=libgamemodeauto.so.0:libgamemode.so.0",
+            ])
+        );
+        // And a switch for a tool that is not installed adds nothing.
+        assert!(wrappers(&cfg, &GameSettings::default(), Vec::new(), |_| false).is_empty());
     }
 
     #[test]

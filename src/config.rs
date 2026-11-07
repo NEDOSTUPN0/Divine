@@ -194,7 +194,10 @@ pub struct GameSettings {
     /// umu game id, e.g. "umu-271590". Empty means Divine looks it up.
     pub umu_id: String,
     pub proton: String,
-    pub args: String,
+    /// A Steam style line, see [`crate::launch_options`]. Read from `args` too,
+    /// which is what it was called while it held game arguments alone.
+    #[serde(alias = "args")]
+    pub launch_options: String,
     /// Two letter language code handed to legendary, e.g. "ru".
     pub language: String,
     /// Executable to start instead of the one the manifest names, relative to
@@ -315,7 +318,7 @@ impl GameSettings {
     fn is_default(&self) -> bool {
         self.umu_id.is_empty()
             && self.proton.is_empty()
-            && self.args.is_empty()
+            && self.launch_options.is_empty()
             && self.language.is_empty()
             && self.override_exe.is_empty()
             && self.override_username.is_empty()
@@ -620,7 +623,7 @@ mod tests {
         cfg.set_game(
             "Fowl",
             GameSettings {
-                args: "-windowed".into(),
+                launch_options: "-windowed".into(),
                 ..GameSettings::default()
             },
         );
@@ -665,7 +668,7 @@ mod tests {
         cfg.set_game(
             "Fowl",
             GameSettings {
-                args: "-windowed -nosplash".into(),
+                launch_options: "gamemoderun %command% -windowed".into(),
                 hdr: Some(false),
                 env: [("DXVK_HUD".to_string(), "fps".to_string())]
                     .into_iter()
@@ -683,9 +686,22 @@ mod tests {
         assert!(read.window.folded_fixes.contains("Heather"));
         assert_eq!(read.proxy, cfg.proxy);
         let fowl = read.game("Fowl");
-        assert_eq!(fowl.args, "-windowed -nosplash");
+        assert_eq!(fowl.launch_options, "gamemoderun %command% -windowed");
         assert_eq!(fowl.hdr, Some(false));
         assert_eq!(fowl.env.get("DXVK_HUD").map(String::as_str), Some("fps"));
+    }
+
+    /// Game arguments written before the field took wrappers too. They are
+    /// still a valid line, and are written back under the new name.
+    #[test]
+    fn arguments_from_before_launch_options_are_kept() {
+        let cfg: Config = toml::from_str("[games.Fowl]\nargs = \"-dx11 -windowed\"\n")
+            .expect("reading an old config.toml");
+        assert_eq!(cfg.game("Fowl").launch_options, "-dx11 -windowed");
+
+        let written = toml::to_string_pretty(&cfg).expect("writing it back");
+        assert!(written.contains("launch_options = \"-dx11 -windowed\""));
+        assert!(!written.contains("args ="));
     }
 
     #[test]

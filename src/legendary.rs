@@ -177,6 +177,38 @@ pub enum Activation {
     },
 }
 
+/// What `legendary launch` is handed besides the game and the wrapper.
+#[derive(Debug, Default)]
+pub struct LaunchArgs {
+    /// legendary's own, such as `--offline`.
+    pub options: Vec<String>,
+    /// Passed to the game exactly as they are.
+    pub game: Vec<String>,
+}
+
+/// The argument list for `legendary launch`.
+///
+/// legendary collects the game's arguments with argparse's `parse_known_args`,
+/// so anything after the app name that looks like one of its own options is
+/// taken as one: `-h` prints legendary's help instead of starting the game, and
+/// `--off` is read as `--offline`. A `--` straight after the app name reaches
+/// the game as an argument of its own. One just before it is what works:
+/// argparse consumes it on the way to the app name and treats every word after
+/// as plain text. Checked against legendary 0.21.1 with `--dry-run`.
+fn launch_argv(app_name: &str, wrapper: &str, args: &LaunchArgs, dry_run: bool) -> Vec<String> {
+    let mut argv: Vec<String> = ["launch", "--no-wine", "--wrapper", wrapper]
+        .map(String::from)
+        .into();
+    if dry_run {
+        argv.push("--dry-run".into());
+    }
+    argv.extend(args.options.iter().cloned());
+    argv.push("--".into());
+    argv.push(app_name.into());
+    argv.extend(args.game.iter().cloned());
+    argv
+}
+
 #[derive(Debug)]
 pub struct LaunchOutcome {
     pub ok: bool,
@@ -287,16 +319,9 @@ impl Legendary {
     /// Deliberately not `run`: legendary exits non-zero when it will not
     /// launch at all, and the reason it gives is the very thing worth reading,
     /// so the output comes back either way.
-    pub fn dry_run(&self, app_name: &str, wrapper: &str, extra_args: &[String]) -> Result<String> {
-        let mut cmd = self.command(&[
-            "launch",
-            app_name,
-            "--no-wine",
-            "--dry-run",
-            "--wrapper",
-            wrapper,
-        ]);
-        cmd.args(extra_args);
+    pub fn dry_run(&self, app_name: &str, wrapper: &str, args: &LaunchArgs) -> Result<String> {
+        let mut cmd = self.command(&[]);
+        cmd.args(launch_argv(app_name, wrapper, args, true));
         let out = cmd.output().context("running legendary launch --dry-run")?;
         Ok(String::from_utf8_lossy(&out.stderr).into_owned())
     }
@@ -719,12 +744,11 @@ impl Legendary {
         app_name: &str,
         wrapper: &str,
         env: &[(String, String)],
-        extra_args: &[String],
+        args: &LaunchArgs,
         started: &dyn Fn(i32),
     ) -> LaunchOutcome {
-        let mut cmd = self.command(&["launch", app_name, "--no-wine", "--wrapper", wrapper]);
-        // legendary forwards anything after its own options to the game.
-        cmd.args(extra_args);
+        let mut cmd = self.command(&[]);
+        cmd.args(launch_argv(app_name, wrapper, args, false));
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -1158,7 +1182,7 @@ fn write_cached_manifest(app_name: &str, version: &str, info: &ManifestInfo) {
 
 #[cfg(test)]
 mod tests {
-    use super::{install_args, InstallMode, Place};
+    use super::{install_args, launch_argv, InstallMode, LaunchArgs, Place};
 
     /// The bug this guards: Grand Theft Auto V sat flagged for verification, so
     /// legendary quietly turned the update into a repair, fetched the files and
@@ -1359,5 +1383,33 @@ mod tests {
             " - Downloaded: 10.00 MiB, Written: 10.00 MiB"
         ));
         assert_eq!(progress.fraction, 0.0);
+    }
+
+    /// `-h` meant for the game used to open legendary's help instead.
+    #[test]
+    fn game_arguments_cannot_be_mistaken_for_legendary_options() {
+        let args = LaunchArgs {
+            options: vec!["--offline".into()],
+            game: ["-w", "1080", "-h", "720", "--json"]
+                .map(String::from)
+                .into(),
+        };
+        assert_eq!(
+            launch_argv("Fowl", "'umu-run'", &args, false),
+            [
+                "launch",
+                "--no-wine",
+                "--wrapper",
+                "'umu-run'",
+                "--offline",
+                "--",
+                "Fowl",
+                "-w",
+                "1080",
+                "-h",
+                "720",
+                "--json",
+            ]
+        );
     }
 }

@@ -228,12 +228,23 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         "Picks the protonfixes umu applies, e.g. umu-271590. Empty looks it up.",
         |settings, value| settings.umu_id = value,
     );
-    let args = write.entry(
-        "Launch arguments",
-        &saved.args,
-        "Passed through to the game",
-        |settings, value| settings.args = value,
+    let launch_options = write.entry(
+        "Launch Options",
+        &saved.launch_options,
+        "Arguments for the game, or a whole command around %command% as in Steam, \
+         e.g. gamemoderun %command% -windowed. Quotes work; $VARIABLES and ~ are \
+         not expanded.",
+        |settings, value| settings.launch_options = value,
     );
+    // Marked while typing, so a stray quote shows before the game refuses to
+    // start over it.
+    launch_options.connect_changed(|row| {
+        if crate::launch_options::parse(&row.text()).is_ok() {
+            row.remove_css_class("error");
+        } else {
+            row.add_css_class("error");
+        }
+    });
     let env = write.entry(
         "Environment",
         &render_env(&saved.env),
@@ -407,6 +418,7 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         gamemode.upcast(),
         mangohud.upcast(),
         fake_epic.upcast(),
+        launch_options.upcast(),
     ] {
         launching.add(&row);
     }
@@ -444,7 +456,6 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         core_fonts.upcast::<gtk::Widget>(),
         language.upcast(),
         umu_id.upcast(),
-        args.upcast(),
         env.upcast(),
         override_exe.upcast(),
         override_username.upcast(),

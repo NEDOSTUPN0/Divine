@@ -5,9 +5,10 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
+use anyhow::Context;
 
 use crate::config::GameSettings;
-use crate::legendary::{Activation, SaveSync};
+use crate::legendary::{Activation, LaunchArgs, SaveSync};
 use crate::log::info;
 use crate::models::Game;
 use crate::runner;
@@ -198,7 +199,7 @@ pub(super) fn action_button(app: &Rc<App>, game: &Game) -> gtk::Box {
                 );
 
                 let per_game = cfg.game(&launch_game.app_name);
-                let args = launch_args(&per_game, &cfg.runner.override_username);
+                let args = launch_args(&per_game, &cfg.runner.override_username)?;
 
                 // Pull first, push after: a stale cloud save must not land on
                 // top of a fresh local one, and the save just made must not be
@@ -355,35 +356,38 @@ fn update_replaces_play(game: &Game, running: bool, allowed_out_of_date: bool) -
     game.update_available() && !running && !allowed_out_of_date
 }
 
-/// legendary's own options first, then whatever is meant for the game.
-/// argparse would sort them out either way, but keeping the order is what
-/// makes the printed command line readable.
-fn launch_args(per_game: &GameSettings, global_username: &str) -> Vec<String> {
-    let mut args: Vec<String> = Vec::new();
+/// legendary's own options, kept apart from what is meant for the game: in one
+/// list legendary would read some of the game's as its own.
+fn launch_args(per_game: &GameSettings, global_username: &str) -> anyhow::Result<LaunchArgs> {
+    let mut options: Vec<String> = Vec::new();
     if per_game.offline {
-        args.push("--offline".into());
+        options.push("--offline".into());
     }
     if per_game.skip_update_check {
-        args.push("--skip-version-check".into());
+        options.push("--skip-version-check".into());
     }
     if !per_game.override_exe.is_empty() {
-        args.push("--override-exe".into());
-        args.push(per_game.override_exe.clone());
+        options.push("--override-exe".into());
+        options.push(per_game.override_exe.clone());
     }
     let username = match per_game.override_username.as_str() {
         "" => global_username,
         own => own,
     };
     if !username.is_empty() {
-        args.push("--override-username".into());
-        args.push(username.to_string());
+        options.push("--override-username".into());
+        options.push(username.to_string());
     }
     if !per_game.language.is_empty() {
-        args.push("--language".into());
-        args.push(per_game.language.clone());
+        options.push("--language".into());
+        options.push(per_game.language.clone());
     }
-    args.extend(per_game.args.split_whitespace().map(str::to_string));
-    args
+    let line = crate::launch_options::parse(&per_game.launch_options)
+        .context("reading the launch options")?;
+    Ok(LaunchArgs {
+        options,
+        game: line.args,
+    })
 }
 
 /// Runs the launch as far as working out the command, then stops and shows it.
@@ -395,7 +399,7 @@ pub(super) fn show_launch_command(app: &Rc<App>, game: &Game) {
     spawn_bg(
         move || {
             let (wrapper, env) = runner::build_launch(&owned, &cfg)?;
-            let args = launch_args(&cfg.game(&owned.app_name), &cfg.runner.override_username);
+            let args = launch_args(&cfg.game(&owned.app_name), &cfg.runner.override_username)?;
             let printed = lgd.dry_run(&owned.app_name, &wrapper, &args)?;
             Ok::<String, anyhow::Error>(describe_launch(&env, &printed))
         },
@@ -692,17 +696,18 @@ mod tests {
     }
 
     #[test]
-    fn legendary_options_come_before_the_game_arguments() {
+    fn legendary_options_stay_apart_from_the_game_arguments() {
         let per_game = GameSettings {
             offline: true,
             skip_update_check: true,
             override_exe: "Binaries/Win64/game.exe".into(),
             language: "ru".into(),
-            args: "-dx11 -windowed".into(),
+            launch_options: "mangohud %command% -dx11 -windowed".into(),
             ..GameSettings::default()
         };
+        let args = launch_args(&per_game, "").expect("building the arguments");
         assert_eq!(
-            launch_args(&per_game, ""),
+            args.options,
             [
                 "--offline",
                 "--skip-version-check",
@@ -710,31 +715,34 @@ mod tests {
                 "Binaries/Win64/game.exe",
                 "--language",
                 "ru",
-                "-dx11",
-                "-windowed",
             ]
         );
-        assert!(launch_args(&GameSettings::default(), "").is_empty());
+        assert_eq!(args.game, ["-dx11", "-windowed"]);
+
+        let none = launch_args(&GameSettings::default(), "").expect("building the arguments");
+        assert!(none.options.is_empty() && none.game.is_empty());
     }
 
     #[test]
     fn a_game_name_beats_the_global_one() {
         let global = "Anonymous";
         let none = GameSettings::default();
-        assert_eq!(
-            launch_args(&none, global),
-            ["--override-username", "Anonymous"]
-        );
+        let options = |settings: &GameSettings, global: &str| {
+            launch_args(settings, global)
+                .expect("building the arguments")
+                .options
+        };
+        assert_eq!(options(&none, global), ["--override-username", "Anonymous"]);
 
         let own = GameSettings {
             override_username: "Someone Else".into(),
             ..GameSettings::default()
         };
         assert_eq!(
-            launch_args(&own, global),
+            options(&own, global),
             ["--override-username", "Someone Else"]
         );
         // Neither set leaves the argument off, so legendary uses the real name.
-        assert!(launch_args(&none, "").is_empty());
+        assert!(options(&none, "").is_empty());
     }
 }
