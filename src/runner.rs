@@ -273,9 +273,35 @@ fn require(binary: &str) -> bool {
 /// library it dlopens. umu's container replaces LD_LIBRARY_PATH, so that lookup
 /// fails and GameMode never engages, quietly. Preloading the client library too
 /// settles it: the dlopen matches an object that is already loaded, by soname,
-/// without searching any path. This takes over LD_PRELOAD, which is
-/// gamemoderun's to set anyway.
-const GAMEMODE_PRELOAD: [&str; 2] = ["env", "LD_PRELOAD=libgamemodeauto.so.0:libgamemode.so.0"];
+/// without searching any path.
+///
+/// `env` sets LD_PRELOAD outright, so a preload of the player's own would be
+/// lost. It goes on the end instead, which is where gamemoderun puts one.
+fn gamemode_preload(kept: Option<&str>) -> [String; 2] {
+    let mut preload = "LD_PRELOAD=libgamemodeauto.so.0:libgamemode.so.0".to_string();
+    if let Some(kept) = kept.filter(|kept| !kept.is_empty()) {
+        preload.push(':');
+        preload.push_str(kept);
+    }
+    ["env".into(), preload]
+}
+
+/// The LD_PRELOAD the launch would carry without GameMode's: from the launch
+/// options, then the Environment field, then whatever Divine itself inherited,
+/// the same order in which the environment is put together.
+fn kept_preload(
+    per_game: &crate::config::GameSettings,
+    options_env: &[(String, String)],
+    inherited: Option<String>,
+) -> Option<String> {
+    options_env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "LD_PRELOAD")
+        .map(|(_, value)| value.clone())
+        .or_else(|| per_game.env.get("LD_PRELOAD").cloned())
+        .or(inherited)
+}
 
 /// Everything the launch runs under ahead of umu or Proton. The launch options'
 /// own wrappers come first, since `%command%` stands for all the rest, then the
@@ -289,6 +315,7 @@ fn wrappers(
     cfg: &Config,
     per_game: &crate::config::GameSettings,
     own: Vec<String>,
+    kept_preload: Option<&str>,
     present: impl Fn(&str) -> bool,
 ) -> Result<Vec<String>> {
     let mut wrapper = Vec::new();
@@ -301,14 +328,14 @@ fn wrappers(
             .is_some_and(|name| name == GAMEMODE);
         wrapper.push(word);
         if is_gamemode && !gamemode {
-            wrapper.extend(GAMEMODE_PRELOAD.map(String::from));
+            wrapper.extend(gamemode_preload(kept_preload));
             gamemode = true;
         }
     }
 
     if !gamemode && per_game.gamemode.unwrap_or(cfg.runner.gamemode) && present(GAMEMODE) {
         wrapper.push(GAMEMODE.into());
-        wrapper.extend(GAMEMODE_PRELOAD.map(String::from));
+        wrapper.extend(gamemode_preload(kept_preload));
     }
     let mut mangohud = per_game.mangohud.unwrap_or(cfg.runner.mangohud) && present(MANGOHUD);
     if per_game.gamescope.enabled && present(gamescope::BINARY) {
@@ -482,7 +509,8 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
 
     let options = crate::launch_options::parse(&per_game.launch_options)
         .context("reading the launch options")?;
-    let mut wrapper = wrappers(cfg, &per_game, options.wrapper, require)?;
+    let kept = kept_preload(&per_game, &options.env, std::env::var("LD_PRELOAD").ok());
+    let mut wrapper = wrappers(cfg, &per_game, options.wrapper, kept.as_deref(), require)?;
 
     // Asked quietly: the wrappers above already warned if it is missing.
     let in_gamescope = gamescope::in_use(&per_game.gamescope);
@@ -745,7 +773,14 @@ mod tests {
         cfg.runner.mangohud = true;
         let options = crate::launch_options::parse("obs-gamecapture %command%").expect("parsing");
         assert_eq!(
-            wrappers(&cfg, &GameSettings::default(), options.wrapper, |_| true).expect("building"),
+            wrappers(
+                &cfg,
+                &GameSettings::default(),
+                options.wrapper,
+                None,
+                |_| true
+            )
+            .expect("building"),
             words(&["obs-gamecapture", "mangohud"])
         );
     }
@@ -766,13 +801,20 @@ mod tests {
         )
         .expect("parsing");
         assert_eq!(
-            wrappers(&cfg, &GameSettings::default(), options.wrapper, |_| true).expect("building"),
+            wrappers(
+                &cfg,
+                &GameSettings::default(),
+                options.wrapper,
+                None,
+                |_| true
+            )
+            .expect("building"),
             words(&preloaded)
         );
 
         // The switch alone builds the same thing under the bare name.
         assert_eq!(
-            wrappers(&cfg, &GameSettings::default(), Vec::new(), |_| true).expect("building"),
+            wrappers(&cfg, &GameSettings::default(), Vec::new(), None, |_| true).expect("building"),
             words(&[
                 "gamemoderun",
                 "env",
@@ -781,9 +823,44 @@ mod tests {
         );
         // And a switch for a tool that is not installed adds nothing.
         assert!(
-            wrappers(&cfg, &GameSettings::default(), Vec::new(), |_| false)
+            wrappers(&cfg, &GameSettings::default(), Vec::new(), None, |_| false)
                 .expect("building")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_preload_of_your_own_survives_gamemode() {
+        let mut cfg = config();
+        cfg.runner.gamemode = true;
+        let per_game = GameSettings {
+            env: [("LD_PRELOAD".to_string(), "field.so".to_string())]
+                .into_iter()
+                .collect(),
+            ..GameSettings::default()
+        };
+        let options =
+            crate::launch_options::parse("LD_PRELOAD=typed.so %command%").expect("parsing");
+
+        // The launch options are written last, so theirs is the one kept.
+        let kept = kept_preload(&per_game, &options.env, Some("divine.so".into()));
+        assert_eq!(kept.as_deref(), Some("typed.so"));
+        assert_eq!(
+            kept_preload(&per_game, &[], Some("divine.so".into())).as_deref(),
+            Some("field.so")
+        );
+        assert_eq!(
+            kept_preload(&GameSettings::default(), &[], Some("divine.so".into())).as_deref(),
+            Some("divine.so")
+        );
+
+        assert_eq!(
+            wrappers(&cfg, &per_game, Vec::new(), kept.as_deref(), |_| true).expect("building"),
+            words(&[
+                "gamemoderun",
+                "env",
+                "LD_PRELOAD=libgamemodeauto.so.0:libgamemode.so.0:typed.so",
+            ])
         );
     }
 
@@ -806,7 +883,7 @@ mod tests {
         cfg.runner.mangohud = true;
         let no_mangoapp = |binary: &str| binary != gamescope::MANGOAPP;
         assert_eq!(
-            wrappers(&cfg, &with_gamescope(), Vec::new(), no_mangoapp).expect("building"),
+            wrappers(&cfg, &with_gamescope(), Vec::new(), None, no_mangoapp).expect("building"),
             words(&[
                 "gamemoderun",
                 "env",
@@ -827,7 +904,7 @@ mod tests {
         let mut cfg = config();
         cfg.runner.mangohud = true;
         assert_eq!(
-            wrappers(&cfg, &with_gamescope(), Vec::new(), |_| true).expect("building"),
+            wrappers(&cfg, &with_gamescope(), Vec::new(), None, |_| true).expect("building"),
             words(&["gamescope", "-w", "1280", "-h", "720", "--mangoapp", "--"])
         );
     }
@@ -857,9 +934,11 @@ mod tests {
     fn a_missing_gamescope_is_left_out() {
         let cfg = config();
         let no_gamescope = |binary: &str| binary != gamescope::BINARY;
-        assert!(wrappers(&cfg, &with_gamescope(), Vec::new(), no_gamescope)
-            .expect("building")
-            .is_empty());
+        assert!(
+            wrappers(&cfg, &with_gamescope(), Vec::new(), None, no_gamescope)
+                .expect("building")
+                .is_empty()
+        );
     }
 
     #[test]
