@@ -1,6 +1,6 @@
 [package]
 name = "divine"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2021"
 description = "Native GTK4 launcher for Epic Games, powered by Legendary"
 license = "GPL-3.0-or-later"
