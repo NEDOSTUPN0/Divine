@@ -24,6 +24,7 @@ mod legendary;
 mod log;
 mod models;
 mod play;
+mod programs;
 mod proton;
 mod protondb;
 mod proxy;

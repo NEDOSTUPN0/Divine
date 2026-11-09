@@ -442,9 +442,18 @@ pub fn window_class(app_name: &str, executable: &str, cfg: &Config) -> Option<St
     if gamescope::in_use(&per_game.gamescope) || !per_game.use_umu.unwrap_or(cfg.runner.use_umu) {
         return None;
     }
-    let wayland = per_game.wayland.unwrap_or(cfg.runner.wayland)
-        && std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let wayland = windows_named_by_program(app_name, cfg);
     class_for(&game_id(app_name, &per_game), executable, wayland)
+}
+
+/// Whether the game's windows will each be named after the program that
+/// opened it, which is what winewayland does, rather than all share one name.
+pub fn windows_named_by_program(app_name: &str, cfg: &Config) -> bool {
+    let per_game = cfg.game(app_name);
+    per_game.use_umu.unwrap_or(cfg.runner.use_umu)
+        && !gamescope::in_use(&per_game.gamescope)
+        && per_game.wayland.unwrap_or(cfg.runner.wayland)
+        && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 fn class_for(umu_id: &str, executable: &str, wayland: bool) -> Option<String> {
@@ -622,6 +631,10 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
     if per_game.fake_epic_launcher(fix.as_ref()) {
         wrapper.push(install_shim(&drive_c)?);
     }
+
+    // Every program the game runs inherits this, which is how its processes
+    // are told apart from everything else's; see programs.rs.
+    env.push((crate::programs::MARK.into(), game.app_name.clone()));
 
     // Per-game variables go last so they can override anything set above, and
     // the launch options last of all, being the line typed most recently.

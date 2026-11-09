@@ -18,6 +18,7 @@ use anyhow::{bail, ensure, Context, Result};
 
 const RT_ICON: u32 = 3;
 const RT_GROUP_ICON: u32 = 14;
+const RT_VERSION: u32 = 16;
 /// No icon in an executable comes anywhere near this; a bigger number is a
 /// broken or hostile file.
 const MAX_ICON_BYTES: u32 = 4 * 1024 * 1024;
@@ -56,6 +57,111 @@ pub fn read(exe: &Path) -> Result<Icon> {
         return Ok(Icon::Png(data));
     }
     decode_dib(&data)
+}
+
+/// What the program calls itself: the description Windows shows in a file's
+/// properties, such as "Rockstar Games Launcher", or failing that its product
+/// name. `None` for a program that says neither.
+pub fn description(exe: &Path) -> Option<String> {
+    let mut file = File::open(exe).ok()?;
+    let pe = Pe::parse(&mut file).ok()?;
+    let data = pe.first_resource(&mut file, RT_VERSION, None).ok()??;
+    let (root, _) = Block::parse(&data, 0)?;
+    let strings = root
+        .children
+        .iter()
+        .find(|block| block.key == "StringFileInfo")?;
+    // English if the program has it, since that is what the rest of the
+    // interface is in, otherwise whatever language it does have.
+    let table = strings
+        .children
+        .iter()
+        .find(|table| table.key.to_ascii_lowercase().starts_with("0409"))
+        .or_else(|| strings.children.first())?;
+    ["FileDescription", "ProductName"]
+        .iter()
+        .find_map(|wanted| {
+            table
+                .children
+                .iter()
+                .find(|entry| entry.key == *wanted)
+                .map(Block::text)
+                .filter(|text| !text.is_empty())
+        })
+}
+
+/// One block of a `VS_VERSIONINFO` resource: its length, the length of its
+/// value, whether that value is text, a UTF-16 key, then the value and the
+/// blocks inside it, each starting on a four byte boundary.
+struct Block<'a> {
+    key: String,
+    value: &'a [u8],
+    children: Vec<Block<'a>>,
+}
+
+impl<'a> Block<'a> {
+    /// The block at `at`, and where the next one starts.
+    fn parse(data: &'a [u8], at: usize) -> Option<(Self, usize)> {
+        let len = usize::from(u16_at(data, at).ok()?);
+        let value_len = usize::from(u16_at(data, at + 2).ok()?);
+        let is_text = u16_at(data, at + 4).ok()? == 1;
+        let end = at.checked_add(len)?.min(data.len());
+        if len < 6 {
+            return None;
+        }
+
+        let mut cursor = at + 6;
+        let mut key = Vec::new();
+        loop {
+            let unit = u16_at(data, cursor).ok()?;
+            cursor += 2;
+            if unit == 0 {
+                break;
+            }
+            key.push(unit);
+        }
+        let key = String::from_utf16_lossy(&key);
+
+        cursor = align(cursor);
+        // A text value is counted in UTF-16 units, anything else in bytes.
+        let value_bytes = if is_text { value_len * 2 } else { value_len };
+        let value = data.get(cursor..(cursor + value_bytes).min(end))?;
+        cursor = align(cursor + value_bytes);
+
+        let mut children = Vec::new();
+        while cursor < end {
+            let Some((child, next)) = Block::parse(data, cursor) else {
+                break;
+            };
+            children.push(child);
+            if next <= cursor {
+                break;
+            }
+            cursor = next;
+        }
+        Some((
+            Block {
+                key,
+                value,
+                children,
+            },
+            align(end),
+        ))
+    }
+
+    fn text(&self) -> String {
+        let units: Vec<u16> = self
+            .value
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .take_while(|unit| *unit != 0)
+            .collect();
+        String::from_utf16_lossy(&units).trim().to_string()
+    }
+}
+
+fn align(at: usize) -> usize {
+    at.div_ceil(4) * 4
 }
 
 /// One size on offer in a group.
@@ -383,6 +489,63 @@ mod tests {
                 id: 2
             }
         );
+    }
+
+    /// Builds one version block the way the resource compiler lays it out.
+    fn block(key: &str, text: Option<&str>, children: &[Vec<u8>]) -> Vec<u8> {
+        let utf16 = |s: &str| -> Vec<u8> {
+            s.encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        };
+        let mut body = utf16(key);
+        // The key starts six bytes in, and the value on a four byte boundary.
+        while (6 + body.len()) % 4 != 0 {
+            body.push(0);
+        }
+        let value_len = text.map_or(0, |text| text.encode_utf16().count() + 1);
+        if let Some(text) = text {
+            body.extend(utf16(text));
+            while (6 + body.len()) % 4 != 0 {
+                body.push(0);
+            }
+        }
+        for child in children {
+            body.extend(child);
+            while (6 + body.len()) % 4 != 0 {
+                body.push(0);
+            }
+        }
+        let mut out = Vec::new();
+        out.extend(((6 + body.len()) as u16).to_le_bytes());
+        out.extend((value_len as u16).to_le_bytes());
+        out.extend(1u16.to_le_bytes());
+        out.extend(body);
+        out
+    }
+
+    #[test]
+    fn a_programs_description_is_read_from_its_version_block() {
+        let table = block(
+            "040904b0",
+            None,
+            &[
+                block("CompanyName", Some("Rockstar Games"), &[]),
+                block("FileDescription", Some("Rockstar Games Launcher"), &[]),
+            ],
+        );
+        let root = block(
+            "VS_VERSION_INFO",
+            None,
+            &[block("StringFileInfo", None, &[table])],
+        );
+        let (parsed, _) = Block::parse(&root, 0).unwrap();
+        let strings = &parsed.children[0];
+        assert_eq!(strings.key, "StringFileInfo");
+        let entries = &strings.children[0].children;
+        assert_eq!(entries[1].key, "FileDescription");
+        assert_eq!(entries[1].text(), "Rockstar Games Launcher");
     }
 
     #[test]

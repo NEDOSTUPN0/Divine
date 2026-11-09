@@ -5,6 +5,14 @@
 //! once: a game installed, moved or removed has its entry follow. Each carries
 //! `X-Divine-AppName`, and only files carrying it are ever rewritten or
 //! removed, so an entry somebody wrote by hand under the same name survives.
+//!
+//! A game whose windows are named after their programs (winewayland) also gets
+//! a hidden entry for each further program it has been seen to run, with that
+//! program's own name and icon: the Rockstar launcher's window shows Rockstar's
+//! icon, the game's shows the game's. A desktop matches a window to an entry by
+//! `StartupWMClass` whether the entry is shown in the menu or not, and GNOME
+//! and Plasma both match windows again when an entry turns up while they are
+//! open, so a program first seen during a session gets its icon in that session.
 
 use std::collections::HashMap;
 use std::fs;
@@ -34,6 +42,10 @@ pub struct Shortcut {
     /// What its window will be called, so the desktop can tell that a running
     /// window is this game's and show this entry's icon on it.
     pub window_class: Option<String>,
+    /// The game's other programs, each to get a hidden entry. Empty unless
+    /// windows are named after their programs; otherwise they all share
+    /// `window_class` and one entry covers them.
+    pub programs: Vec<crate::programs::Program>,
 }
 
 impl Shortcut {
@@ -56,6 +68,20 @@ impl Shortcut {
                 &installed.executable,
                 cfg,
             ),
+            programs: if crate::runner::windows_named_by_program(&installed.app_name, cfg) {
+                let main = installed
+                    .executable
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_lowercase();
+                crate::programs::known(&installed.app_name)
+                    .into_iter()
+                    .filter(|program| program.class != main)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             app_name: installed.app_name.clone(),
         }
     }
@@ -73,7 +99,7 @@ pub fn installed(lgd: &Legendary, cfg: &Config) -> Result<Vec<Shortcut>> {
         .list_installed()
         .context("listing the installed games")?
         .into_iter()
-        .filter(|installed| desktop_id(&installed.app_name).is_some())
+        .filter(|installed| stem(&installed.app_name).is_some())
         .map(|installed| Shortcut::new(lgd, cfg, &installed))
         .collect())
 }
@@ -81,21 +107,55 @@ pub fn installed(lgd: &Legendary, cfg: &Config) -> Result<Vec<Shortcut>> {
 /// Brings the menu in line with what is installed, or empties it of Divine's
 /// entries when they are switched off. Blocking: icons may have to be fetched.
 pub fn sync(games: &[Shortcut], enabled: bool) -> Result<()> {
+    let wanted = if enabled { games } else { &[] };
+    reconcile(wanted, |_| true)
+}
+
+/// [`sync`] for one game alone, for a game that has just been seen running a
+/// program it was not known to run.
+pub fn sync_game(game: &Shortcut) -> Result<()> {
+    reconcile(std::slice::from_ref(game), |app_name| {
+        app_name == game.app_name
+    })
+}
+
+/// Writes the entries `games` want and removes the rest of Divine's, among
+/// the entries of the games `in_scope` names.
+fn reconcile(games: &[Shortcut], in_scope: impl Fn(&str) -> bool) -> Result<()> {
     let dir = applications_dir();
     let ours = existing(&dir);
-    let wanted: HashMap<&str, &Shortcut> = if enabled {
-        games
-            .iter()
-            .map(|game| (game.app_name.as_str(), game))
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    let command = command();
+    let mut wanted: HashMap<PathBuf, String> = HashMap::new();
+    for game in games {
+        let Some(stem) = stem(&game.app_name) else {
+            continue;
+        };
+        let icon = log_missing(&game.title, icon(game));
+        wanted.insert(
+            dir.join(desktop_id(&stem)),
+            desktop_entry(game, &command, icon.as_deref()),
+        );
+        for program in &game.programs {
+            let Some(twin) = twin_stem(&stem, program) else {
+                continue;
+            };
+            let icon = log_missing(&program.class, twin_icon(&twin, game, program));
+            wanted.insert(
+                dir.join(desktop_id(&twin)),
+                twin_entry(game, program, &command, icon.as_deref()),
+            );
+        }
+    }
 
-    for (app_name, path) in &ours {
-        if !wanted.contains_key(app_name.as_str()) {
+    for (path, app_name) in &ours {
+        if in_scope(app_name) && !wanted.contains_key(path) {
             fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
-            let _ = fs::remove_file(icon_path(app_name));
+            if let Some(stem) = path
+                .file_stem()
+                .and_then(|name| name.to_str()?.strip_prefix("divine-"))
+            {
+                let _ = fs::remove_file(icon_path(stem));
+            }
         }
     }
 
@@ -103,29 +163,21 @@ pub fn sync(games: &[Shortcut], enabled: bool) -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let command = command();
-    for game in wanted.values() {
-        let Some(id) = desktop_id(&game.app_name) else {
-            continue;
-        };
-        let path = dir.join(id);
+    for (path, entry) in wanted {
         // A file of the same name somebody else wrote is left as it is.
-        if path.exists() && !ours.contains_key(&game.app_name) {
+        if path.exists() && !ours.contains_key(&path) {
             continue;
         }
-        let icon = match icon(game) {
-            Ok(icon) => Some(icon),
-            Err(e) => {
-                warn!("no icon for {}: {e:#}", game.title);
-                None
-            }
-        };
-        let entry = desktop_entry(game, &command, icon.as_deref());
         if fs::read_to_string(&path).ok().as_deref() != Some(entry.as_str()) {
             fs::write(&path, entry).with_context(|| format!("writing {}", path.display()))?;
         }
     }
     Ok(())
+}
+
+fn log_missing(what: &str, icon: Result<PathBuf>) -> Option<PathBuf> {
+    icon.inspect_err(|e| warn!("no icon for {what}: {e:#}"))
+        .ok()
 }
 
 /// The program a shortcut runs. Found on `PATH` where possible, because the
@@ -150,10 +202,32 @@ fn is_executable(path: &Path) -> bool {
 /// The game's icon as a PNG of its own: the one in its program, as Windows
 /// and Steam would show it, or failing that its cover.
 pub fn icon(game: &Shortcut) -> Result<PathBuf> {
+    let stem = stem(&game.app_name).context("the game's name cannot name a file")?;
+    make_icon(&stem, game.exe.as_deref(), || {
+        warn!("{} has no icon of its own, using its cover", game.title);
+        cover_icon(game)
+    })
+}
+
+/// A program's own icon, or the game's when the program has none.
+fn twin_icon(stem: &str, game: &Shortcut, program: &crate::programs::Program) -> Result<PathBuf> {
+    make_icon(stem, Some(&program.path), || {
+        anyhow::bail!("{} carries no icon", program.class)
+    })
+    .or_else(|_| icon(game))
+}
+
+/// The PNG at `icons/<stem>.png`, made once from the program's icon or, when
+/// it has none, from `fallback`.
+fn make_icon(
+    stem: &str,
+    exe: Option<&Path>,
+    fallback: impl FnOnce() -> Result<gtk::gdk_pixbuf::Pixbuf>,
+) -> Result<PathBuf> {
     use gtk::gdk_pixbuf::{Colorspace, Pixbuf};
     use gtk::glib;
 
-    let path = icon_path(&game.app_name);
+    let path = icon_path(stem);
     if path.is_file() {
         return Ok(path);
     }
@@ -161,9 +235,7 @@ pub fn icon(game: &Shortcut) -> Result<PathBuf> {
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let partial = path.with_extension("partial");
 
-    let from_exe = game
-        .exe
-        .as_deref()
+    let from_exe = exe
         .context("legendary does not know the game's program")
         .and_then(crate::exe_icon::read);
     match from_exe {
@@ -188,12 +260,8 @@ pub fn icon(game: &Shortcut) -> Result<PathBuf> {
             .savev(&partial, "png", &[])
             .with_context(|| format!("writing {}", partial.display()))?;
         }
-        Err(e) => {
-            warn!(
-                "{} has no icon of its own, using its cover: {e:#}",
-                game.title
-            );
-            cover_icon(game)?
+        Err(_) => {
+            fallback()?
                 .savev(&partial, "png", &[])
                 .with_context(|| format!("writing {}", partial.display()))?;
         }
@@ -257,19 +325,66 @@ fn desktop_entry(game: &Shortcut, command: &Path, icon: Option<&Path>) -> String
     entry
 }
 
-/// The file name of a game's entry. Desktop file ids are letters, digits,
-/// `-` and `_`, and a game whose app name strays outside that gets none rather
-/// than one that has to be decoded back.
-fn desktop_id(app_name: &str) -> Option<String> {
+/// The hidden entry for one of a game's other programs. It starts the game
+/// like the main entry does, should anything offer to start it, and carries
+/// the name the program gives itself.
+fn twin_entry(
+    game: &Shortcut,
+    program: &crate::programs::Program,
+    command: &Path,
+    icon: Option<&Path>,
+) -> String {
+    let name = crate::exe_icon::description(&program.path).unwrap_or_else(|| game.title.clone());
+    let mut entry = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name={name}\n\
+         Exec={exec} {launch} {app_name}\n\
+         Terminal=false\n\
+         NoDisplay=true\n\
+         StartupWMClass={class}\n\
+         {MARK}={app_name}\n",
+        name = escape(&name),
+        exec = escape(&exec_quote(&command.to_string_lossy())),
+        launch = crate::play::LAUNCH,
+        app_name = game.app_name,
+        class = escape(&program.class),
+    );
+    if let Some(icon) = icon {
+        entry.push_str(&format!("Icon={}\n", escape(&icon.to_string_lossy())));
+    }
+    entry
+}
+
+/// What a game's entry and its icon are filed under. Desktop file ids are
+/// letters, digits, `-` and `_`, and a game whose app name strays outside that
+/// gets none rather than one that has to be decoded back.
+fn stem(app_name: &str) -> Option<String> {
     let fits = !app_name.is_empty()
         && app_name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    fits.then(|| format!("divine-{app_name}.desktop"))
+    fits.then(|| app_name.to_string())
 }
 
-/// Divine's entries already in the menu, by the game each is for.
-fn existing(dir: &Path) -> HashMap<String, PathBuf> {
+/// What one of a game's other programs is filed under: the game's stem, two
+/// dashes, and the program's file name without what cannot go in an id.
+fn twin_stem(game: &str, program: &crate::programs::Program) -> Option<String> {
+    let name: String = program
+        .class
+        .trim_end_matches(".exe")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then(|| format!("{game}--{name}"))
+}
+
+fn desktop_id(stem: &str) -> String {
+    format!("divine-{stem}.desktop")
+}
+
+/// Divine's entries already in the menu, each with the game it is for.
+fn existing(dir: &Path) -> HashMap<PathBuf, String> {
     let mut ours = HashMap::new();
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
@@ -283,7 +398,7 @@ fn existing(dir: &Path) -> HashMap<String, PathBuf> {
             .lines()
             .find_map(|line| line.strip_prefix(MARK)?.strip_prefix('='));
         if let Some(app_name) = app_name {
-            ours.insert(app_name.trim().to_string(), path);
+            ours.insert(path, app_name.trim().to_string());
         }
     }
     ours
@@ -332,8 +447,8 @@ fn icons_dir() -> PathBuf {
         .join("icons")
 }
 
-fn icon_path(app_name: &str) -> PathBuf {
-    icons_dir().join(format!("{app_name}.png"))
+fn icon_path(stem: &str) -> PathBuf {
+    icons_dir().join(format!("{stem}.png"))
 }
 
 /// Removes a file Divine made, where having nothing to remove is fine.
@@ -357,6 +472,7 @@ mod tests {
             key_images: Vec::new(),
             exe: None,
             window_class: Some("steam_app_egs_Fowl".into()),
+            programs: Vec::new(),
         }
     }
 
@@ -391,13 +507,38 @@ mod tests {
 
     #[test]
     fn an_app_name_that_cannot_be_a_file_name_gets_no_entry() {
-        assert_eq!(desktop_id("Fowl").as_deref(), Some("divine-Fowl.desktop"));
+        assert_eq!(stem("Fowl").as_deref(), Some("Fowl"));
         assert_eq!(
-            desktop_id("963137e4c29d4c79a81323b8fab03a40").as_deref(),
-            Some("divine-963137e4c29d4c79a81323b8fab03a40.desktop")
+            stem("963137e4c29d4c79a81323b8fab03a40").as_deref(),
+            Some("963137e4c29d4c79a81323b8fab03a40")
         );
-        assert!(desktop_id("../evil").is_none());
-        assert!(desktop_id("").is_none());
+        assert!(stem("../evil").is_none());
+        assert!(stem("").is_none());
+    }
+
+    /// The Rockstar launcher GTA V starts, as programs.rs writes it down.
+    fn launcher() -> crate::programs::Program {
+        crate::programs::Program {
+            class: "launcher.exe".into(),
+            path: "/nowhere/Rockstar Games/Launcher/Launcher.exe".into(),
+        }
+    }
+
+    #[test]
+    fn another_program_gets_a_hidden_entry_its_window_will_match() {
+        let gta = game(
+            "8769e24080ea413b8ebca3f1b8c50951",
+            "Grand Theft Auto V Enhanced",
+        );
+        let twin = twin_stem("8769e24080ea413b8ebca3f1b8c50951", &launcher()).unwrap();
+        assert_eq!(twin, "8769e24080ea413b8ebca3f1b8c50951--launcher");
+        let entry = twin_entry(&gta, &launcher(), Path::new("divine"), None);
+        assert!(entry.contains("\nNoDisplay=true\n"));
+        assert!(entry.contains("\nStartupWMClass=launcher.exe\n"));
+        // Still the game's, so it is kept and removed along with the game.
+        assert!(entry.contains("\nX-Divine-AppName=8769e24080ea413b8ebca3f1b8c50951\n"));
+        // A program that does not say what it is goes by the game's name.
+        assert!(entry.contains("\nName=Grand Theft Auto V Enhanced\n"));
     }
 
     #[test]
@@ -418,7 +559,11 @@ mod tests {
 
         let ours = existing(&dir);
         assert_eq!(ours.len(), 1);
-        assert!(ours.contains_key("Fowl"));
+        assert_eq!(
+            ours.get(&dir.join("divine-Fowl.desktop"))
+                .map(String::as_str),
+            Some("Fowl")
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

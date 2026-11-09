@@ -474,6 +474,7 @@ mod tests {
             key_images: Vec::new(),
             exe: None,
             window_class: None,
+            programs: Vec::new(),
         };
 
         for _ in 0..2 {

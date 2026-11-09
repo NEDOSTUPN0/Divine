@@ -62,6 +62,10 @@ pub fn run(
 
     let account = lgd.account().map(|a| a.id).unwrap_or_default();
     let watch = crate::epic::playtime::Watch::start(&game.app_name, &account);
+    let _programs = game
+        .installed
+        .as_ref()
+        .map(|installed| watch_programs(lgd, cfg, &prefix, installed));
     let outcome = lgd.launch(&game.app_name, &wrapper, &env, &args, &|group| {
         // Written down as well as held, so that a window opened, or opened
         // again, while the game is up knows the game is up.
@@ -81,6 +85,36 @@ pub fn run(
         sync_saves(lgd, &game.app_name, &prefix, SaveSync::Upload);
     }
     Ok(outcome)
+}
+
+/// Notes the programs the game runs, and gives each a menu entry of its own
+/// the moment it shows up, so that its window has its icon straight away.
+fn watch_programs(
+    lgd: &Legendary,
+    cfg: &Config,
+    prefix: &Path,
+    installed: &crate::models::InstalledEntry,
+) -> crate::programs::Watch {
+    let lgd = lgd.clone();
+    let cfg = cfg.clone();
+    let entry = installed.clone();
+    crate::programs::Watch::start(
+        &installed.app_name,
+        prefix,
+        Path::new(&installed.install_path),
+        move || {
+            if !cfg.general.shortcuts {
+                return;
+            }
+            let game = crate::shortcuts::Shortcut::new(&lgd, &cfg, &entry);
+            if let Err(e) = crate::shortcuts::sync_game(&game) {
+                warn!(
+                    "cannot give {}'s programs entries of their own: {e:#}",
+                    game.title
+                );
+            }
+        },
+    )
 }
 
 /// legendary's own options, kept apart from what is meant for the game: in one
