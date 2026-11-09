@@ -214,7 +214,8 @@ pub(super) fn action_button(app: &Rc<App>, game: &Game) -> gtk::Box {
                 let report = |group: i32| {
                     let _ = pid_tx.try_send(group);
                 };
-                let watch = crate::epic::playtime::Watch::start(&launch_game.app_name);
+                let account = lgd.account().map(|a| a.id).unwrap_or_default();
+                let watch = crate::epic::playtime::Watch::start(&launch_game.app_name, &account);
                 let outcome = lgd.launch(&launch_game.app_name, &wrapper, &env, &args, &report);
                 // A launch that fails leaves a session of a few seconds, which is
                 // not time played. A game that dies after an hour still counts.

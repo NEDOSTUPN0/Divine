@@ -1,7 +1,7 @@
 //! Thin wrapper around the legendary CLI. Everything Divine knows about Epic
 //! comes from here; we never talk to Epic's API ourselves.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::CommandExt;
@@ -13,6 +13,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::{self, Account};
 use crate::config::{self, Config};
 use crate::log::warn;
 use crate::models::{InstalledEntry, ListEntry};
@@ -186,6 +187,23 @@ pub struct LaunchArgs {
     pub game: Vec<String>,
 }
 
+/// Every app the account whose assets.json sits in `dir` owns, across
+/// platforms. Empty when the file cannot be read.
+pub fn owned(dir: &Path) -> HashSet<String> {
+    #[derive(Deserialize)]
+    struct Asset {
+        app_name: String,
+    }
+    fs::read_to_string(dir.join("assets.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<HashMap<String, Vec<Asset>>>(&text).ok())
+        .into_iter()
+        .flat_map(HashMap::into_values)
+        .flatten()
+        .map(|asset| asset.app_name)
+        .collect()
+}
+
 /// The argument list for `legendary launch`.
 ///
 /// legendary collects the game's arguments with argparse's `parse_known_args`,
@@ -264,15 +282,25 @@ impl Legendary {
         serde_json::from_str(&stdout).context("parsing legendary JSON output")
     }
 
+    /// The same legendary, keeping its state somewhere else.
+    pub fn in_dir(&self, dir: &Path) -> Legendary {
+        Legendary {
+            config_dir: dir.to_path_buf(),
+            ..self.clone()
+        }
+    }
+
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
     pub fn user_file(&self) -> PathBuf {
         self.config_dir.join("user.json")
     }
 
     /// Cheap, offline check: is there a usable session on disk?
-    pub fn account(&self) -> Option<String> {
-        let text = fs::read_to_string(self.user_file()).ok()?;
-        let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-        json.get("displayName")?.as_str().map(str::to_string)
+    pub fn account(&self) -> Option<Account> {
+        accounts::read(&self.user_file())
     }
 
     pub fn is_logged_in(&self) -> bool {
@@ -280,7 +308,7 @@ impl Legendary {
     }
 
     /// `auth --code` exits 0 even when the code is rejected, so verify by hand.
-    pub fn auth(&self, code: &str) -> Result<String> {
+    pub fn auth(&self, code: &str) -> Result<Account> {
         let out = self
             .command(&["auth", "--code", code])
             .output()
@@ -365,8 +393,14 @@ impl Legendary {
             .collect()
     }
 
-    /// Everything legendary has cached: one JSON file per owned app.
+    /// Everything legendary has cached for the active account.
+    ///
+    /// The metadata directory is shared between accounts, and legendary keeps
+    /// the entry of anything installed whoever owns it, so the cache alone says
+    /// nothing about this account. Its assets.json does: it is swapped along
+    /// with the session.
     fn cached_entries(&self) -> Result<Vec<ListEntry>> {
+        let owned = owned(&self.config_dir);
         let dir = self.config_dir.join("metadata");
         let mut entries = Vec::new();
         for file in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
@@ -378,7 +412,9 @@ impl Legendary {
                 continue;
             };
             if let Ok(entry) = serde_json::from_str::<ListEntry>(&text) {
-                entries.push(entry);
+                if owned.contains(&entry.app_name) {
+                    entries.push(entry);
+                }
             }
         }
         Ok(entries)

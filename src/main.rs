@@ -7,6 +7,7 @@
 //! achievements, playtime, Proton builds, the launch environment — is Divine's,
 //! and each of those is a module below.
 
+mod accounts;
 mod cleanup;
 mod config;
 mod covers;

@@ -1,4 +1,5 @@
-//! Epic sign-in: open the login page in a browser, paste the code back.
+//! Epic sign-in: open the login page in a browser, paste the code back. The
+//! same page adds a second account, with a way back to the first.
 
 use std::rc::Rc;
 
@@ -87,7 +88,7 @@ pub fn view(app: &Rc<App>) -> gtk::Widget {
         let button = button.clone();
         let weak = Rc::downgrade(&app);
         spawn_bg(
-            move || lgd.auth(&code),
+            move || crate::accounts::sign_in(&lgd, &code),
             move |result| {
                 let Some(app) = weak.upgrade() else {
                     return;
@@ -95,10 +96,9 @@ pub fn view(app: &Rc<App>) -> gtk::Widget {
                 button.set_sensitive(true);
                 button.set_label("Sign In");
                 match result {
-                    Ok(name) => {
-                        app.toast(&format!("Signed in as {name}"));
-                        app.show_library();
-                        app.refresh();
+                    Ok(account) => {
+                        app.toast(&format!("Signed in as {}", account.name));
+                        app.account_changed();
                     }
                     Err(e) => app.toast_error("Sign-in failed", &e),
                 }
@@ -106,8 +106,27 @@ pub fn view(app: &Rc<App>) -> gtk::Widget {
         );
     });
 
+    let header = adw::HeaderBar::new();
+    if app.lgd.borrow().is_logged_in() {
+        status.set_title("Add an Epic Games Account");
+        // Epic's page hands out a code for whoever the browser is signed in
+        // as, which is the account Divine already has.
+        group.set_description(Some(
+            "Sign in to Epic in your browser as the other account, then paste the \
+             authorizationCode value here. If the browser is still signed in as the \
+             current one, sign out of Epic there first or use a private window.",
+        ));
+        let cancel = gtk::Button::with_label("Cancel");
+        let weak = Rc::downgrade(app);
+        cancel.connect_clicked(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.show_library();
+            }
+        });
+        header.pack_start(&cancel);
+    }
     let view = adw::ToolbarView::builder().content(&status).build();
-    view.add_top_bar(&adw::HeaderBar::new());
+    view.add_top_bar(&header);
     view.upcast()
 }
 

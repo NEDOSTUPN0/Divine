@@ -49,17 +49,27 @@ pub struct Session {
     /// False while the game is still running, or when Divine died with it.
     #[serde(default)]
     pub done: bool,
+    /// The Epic account it was played on. Empty in sessions journalled before
+    /// Divine held more than one account; those go to whichever is signed in.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account: String,
 }
 
 impl Session {
-    pub fn started(app_name: &str) -> Self {
+    pub fn started(app_name: &str, account: &str) -> Self {
         let now = timestamp();
         Session {
             app_name: app_name.to_string(),
             start: now.clone(),
             end: now,
             done: false,
+            account: account.to_string(),
         }
+    }
+
+    /// Whether the session may be counted for, and reported as, this account.
+    pub fn belongs_to(&self, account: &str) -> bool {
+        self.account.is_empty() || self.account == account
     }
 
     /// Seconds between start and end, for showing time Epic has not counted yet.
@@ -104,11 +114,10 @@ pub fn totals(user_file: &Path) -> Result<HashMap<String, u64>> {
 
 /// Reports sessions to Epic. Sending the same session twice is harmless, so a
 /// caller that is unsure whether the last attempt landed should just send again.
-pub fn report(user_file: &Path, sessions: &[Session]) -> Result<()> {
+fn report(user: &User, sessions: &[Session]) -> Result<()> {
     if sessions.is_empty() {
         return Ok(());
     }
-    let user = User::read(user_file)?;
     let machine = machine_id()?;
     let records: Vec<serde_json::Value> = sessions
         .iter()
@@ -154,8 +163,8 @@ pub struct Watch {
 }
 
 impl Watch {
-    pub fn start(app_name: &str) -> Self {
-        let session = Arc::new(Mutex::new(Session::started(app_name)));
+    pub fn start(app_name: &str, account: &str) -> Self {
+        let session = Arc::new(Mutex::new(Session::started(app_name, account)));
         if let Ok(session) = session.lock() {
             remember(&session);
         }
@@ -284,9 +293,20 @@ pub fn stale() -> Vec<Session> {
 /// Hands the journal to Epic and drops what it accepted. Everything goes in
 /// one request however many games it covers, which is how the launcher empties
 /// its own cache, and is why a backlog cannot turn into a burst of traffic.
+///
+/// Only the signed-in account's sessions go; another account's wait in the
+/// journal until that account is the one signed in.
 pub fn flush(user_file: &Path) -> Result<()> {
     let (fresh, _) = by_age(pending());
-    report(user_file, &fresh)?;
+    let Ok(user) = User::read(user_file) else {
+        // Nobody to report to, which is no failure: the journal keeps it all.
+        return Ok(());
+    };
+    let fresh: Vec<Session> = fresh
+        .into_iter()
+        .filter(|session| session.belongs_to(&user.account_id))
+        .collect();
+    report(&user, &fresh)?;
     for session in &fresh {
         forget(session);
     }
@@ -336,10 +356,14 @@ pub fn forget(session: &Session) {
     save(&sessions);
 }
 
-/// Time Divine has recorded but Epic has not yet counted, per game.
-pub fn unreported() -> HashMap<String, u64> {
+/// Time Divine has recorded on an account but Epic has not yet counted, per
+/// game.
+pub fn unreported(account: &str) -> HashMap<String, u64> {
     let mut extra: HashMap<String, u64> = HashMap::new();
-    for session in pending() {
+    for session in pending()
+        .into_iter()
+        .filter(|session| session.belongs_to(account))
+    {
         *extra.entry(session.app_name.clone()).or_default() += session.seconds();
     }
     extra
@@ -491,9 +515,21 @@ mod tests {
             start: "2026-08-19T00:54:20.173Z".into(),
             end: "2026-08-19T01:05:23.602Z".into(),
             done: true,
+            account: String::new(),
         };
         // The 11 minute session from the capture.
         assert_eq!(session.seconds(), 663);
+    }
+
+    #[test]
+    fn a_session_goes_to_the_account_it_was_played_on() {
+        let alice = Session::started("Fowl", "aaaa1111");
+        assert!(alice.belongs_to("aaaa1111"));
+        assert!(!alice.belongs_to("bbbb2222"));
+        // Journalled before Divine knew accounts apart: whoever is signed in.
+        let older: Session =
+            serde_json::from_str(r#"{"app_name":"Fowl","start":"","end":"","done":true}"#).unwrap();
+        assert!(older.belongs_to("bbbb2222"));
     }
 
     #[test]
@@ -514,6 +550,7 @@ mod tests {
             start: at(ago + 600),
             end: at(ago),
             done: true,
+            account: String::new(),
         };
 
         let (fresh, stale) = by_age(vec![session(60), session(25 * 3600), session(3600)]);

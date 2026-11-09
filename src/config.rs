@@ -91,6 +91,11 @@ pub fn sdl_dir() -> PathBuf {
     cache_dir().join("sdl")
 }
 
+/// The sessions of the signed-in accounts legendary is not using right now.
+pub fn accounts_dir() -> PathBuf {
+    config_dir().join("accounts")
+}
+
 pub fn legendary_config_dir() -> PathBuf {
     config_dir().join("legendaryConfig").join("legendary")
 }

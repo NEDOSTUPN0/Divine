@@ -256,7 +256,8 @@ fn info_tiles(app: &Rc<App>, game: &Game, age: &gtk::Label) -> gtk::Box {
 /// handed over yet. Epic's half arrives over the network, so the tile opens
 /// with what is on disk and grows once the answer lands.
 fn played_tile(app: &Rc<App>, game: &Game) -> gtk::Box {
-    let local = crate::epic::playtime::unreported()
+    let account = app.lgd.borrow().account().map(|a| a.id).unwrap_or_default();
+    let local = crate::epic::playtime::unreported(&account)
         .get(&game.app_name)
         .copied()
         .unwrap_or_default();

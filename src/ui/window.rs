@@ -7,6 +7,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+use crate::accounts;
 use crate::config::Config;
 use crate::epic::collections;
 use crate::legendary::Legendary;
@@ -67,6 +68,9 @@ pub struct App {
     /// The primary menu button, kept so F10 can open it the way it does in
     /// every other GNOME application.
     menu_button: OnceCell<gtk::MenuButton>,
+    /// The section of that menu listing the signed-in accounts, redrawn
+    /// whenever one is added, dropped or switched to.
+    account_menu: gio::Menu,
     pub nav: adw::NavigationView,
     pub split: adw::OverlaySplitView,
     pub toasts: adw::ToastOverlay,
@@ -188,6 +192,7 @@ impl App {
             window,
             library_page: OnceCell::new(),
             menu_button: OnceCell::new(),
+            account_menu: gio::Menu::new(),
             cfg: RefCell::new(cfg),
             lgd: RefCell::new(lgd),
             games: RefCell::new(Vec::new()),
@@ -260,20 +265,6 @@ impl App {
                 app.downloads.stop_all();
             }
         });
-
-        // A session Divine did not live to close is handed over now, marked
-        // unfinished, the way the Windows launcher recovers its own journal.
-        if this.cfg.borrow().runner.report_playtime {
-            let user_file = this.lgd.borrow().user_file();
-            spawn_bg(
-                move || crate::epic::playtime::flush(&user_file),
-                |result| {
-                    if let Err(e) = result {
-                        warn!("the journalled playtime is not with Epic yet: {e:#}");
-                    }
-                },
-            );
-        }
 
         // Proton scanning touches the disk only, so it is fine to do up front.
         this.rescan_runners();
@@ -357,10 +348,13 @@ impl App {
         *self.runners.borrow_mut() = found;
     }
 
+    /// Built afresh each time: whether there is an account to go back to
+    /// changes what the page offers, and a code typed last time is spent.
     pub fn show_login(self: &Rc<Self>) {
-        if self.root.child_by_name("login").is_none() {
-            self.root.add_named(&login::view(self), Some("login"));
+        if let Some(old) = self.root.child_by_name("login") {
+            self.root.remove(&old);
         }
+        self.root.add_named(&login::view(self), Some("login"));
         self.root.set_visible_child_name("login");
     }
 
@@ -377,6 +371,7 @@ impl App {
             ("import", Self::import_foreign),
             ("preferences", preferences::show),
             ("logout", Self::logout),
+            ("account-add", Self::add_account),
             ("about", Self::show_about),
             ("collection-new", Self::new_collection),
             ("search", Self::start_search),
@@ -414,6 +409,23 @@ impl App {
             });
             self.window.add_action(&action);
         }
+
+        // One radio item per account in the menu, the active one checked.
+        let account = gio::SimpleAction::new_stateful(
+            "account",
+            Some(glib::VariantTy::STRING),
+            &String::new().to_variant(),
+        );
+        let weak = Rc::downgrade(self);
+        account.connect_activate(move |action, id| {
+            let (Some(this), Some(id)) = (weak.upgrade(), id.and_then(|id| id.str())) else {
+                return;
+            };
+            if action.state().as_ref().and_then(|state| state.str()) != Some(id) {
+                this.switch_account(id);
+            }
+        });
+        self.window.add_action(&account);
 
         // Clicking a notification should bring the launcher forward, which
         // only works through an action the application itself carries.
@@ -669,6 +681,7 @@ impl App {
     /// and this runs on every refresh.
     pub fn load_collections(self: &Rc<Self>) {
         let user_file = self.lgd.borrow().user_file();
+        let asked_for = self.lgd.borrow().account();
         let weak = Rc::downgrade(self);
         spawn_bg(
             move || crate::epic::collections::all(&user_file),
@@ -676,6 +689,9 @@ impl App {
                 let Some(this) = weak.upgrade() else {
                     return;
                 };
+                if this.lgd.borrow().account() != asked_for {
+                    return;
+                }
                 match result {
                     // A membership dialog left open redraws from here too.
                     Ok(collections) => this.show_collections(|held| *held = collections),
@@ -726,14 +742,17 @@ impl App {
             }
         });
 
+        self.fill_accounts();
+        let rest = gio::Menu::new();
+        rest.append(Some("New Collection…"), Some("win.collection-new"));
+        rest.append(Some("Refresh Library"), Some("win.refresh"));
+        rest.append(Some("Import Installed Games"), Some("win.import"));
+        rest.append(Some("Preferences"), Some("win.preferences"));
+        rest.append(Some("Keyboard Shortcuts"), Some("win.show-help-overlay"));
+        rest.append(Some("About Divine"), Some("win.about"));
         let menu = gio::Menu::new();
-        menu.append(Some("New Collection…"), Some("win.collection-new"));
-        menu.append(Some("Refresh Library"), Some("win.refresh"));
-        menu.append(Some("Import Installed Games"), Some("win.import"));
-        menu.append(Some("Preferences"), Some("win.preferences"));
-        menu.append(Some("Sign Out"), Some("win.logout"));
-        menu.append(Some("Keyboard Shortcuts"), Some("win.show-help-overlay"));
-        menu.append(Some("About Divine"), Some("win.about"));
+        menu.append_section(None, &self.account_menu);
+        menu.append_section(None, &rest);
 
         let collapse = gtk::Button::builder()
             .icon_name("sidebar-show-symbolic")
@@ -972,16 +991,26 @@ impl App {
     pub fn refresh(self: &Rc<Self>) {
         self.stack.set_visible_child_name("loading");
         let lgd = self.lgd.borrow().clone();
+        let asked_for = lgd.account();
+        let report_playtime = self.cfg.borrow().runner.report_playtime;
         let weak = Rc::downgrade(self);
         spawn_bg(
             move || {
                 let installed = lgd.list_installed().unwrap_or_default();
-                // Add-ons never come back from `list`, only from the cache it
-                // fills, so the two sources are stitched together here.
-                let dlcs = lgd.cached_dlcs();
                 match lgd.list() {
                     Ok(mut list) => {
-                        list.extend(dlcs);
+                        // Add-ons never come back from `list`, only from the
+                        // cache it fills, so they are read once it is done.
+                        list.extend(lgd.cached_dlcs());
+                        // A session Divine did not live to close, or one
+                        // played on this account while another was signed in,
+                        // is handed over now. Not before: `list` is what renews
+                        // a session that lapsed while it sat unused.
+                        if report_playtime {
+                            if let Err(e) = crate::epic::playtime::flush(&lgd.user_file()) {
+                                warn!("the journalled playtime is not with Epic yet: {e:#}");
+                            }
+                        }
                         Ok((models::merge(list, installed), None))
                     }
                     // Falling back to legendary's own metadata cache keeps the
@@ -1005,6 +1034,11 @@ impl App {
                 let Some(this) = weak.upgrade() else {
                     return;
                 };
+                // The account changed while this was out, and the refresh that
+                // change started is the one worth showing.
+                if this.lgd.borrow().account() != asked_for {
+                    return;
+                }
                 match result {
                     Ok((games, warning)) => {
                         // Filled in the background so that opening a game page
@@ -1150,21 +1184,115 @@ impl App {
         );
     }
 
-    fn logout(self: &Rc<Self>) {
+    /// Redraws the account section of the menu, checking the active one.
+    fn fill_accounts(&self) {
+        let (all, active) = {
+            let lgd = self.lgd.borrow();
+            (
+                accounts::all(lgd.config_dir(), &crate::config::accounts_dir()),
+                lgd.account(),
+            )
+        };
+        self.account_menu.remove_all();
+        for account in all {
+            // Menu labels read an underscore as a mnemonic; Epic names can
+            // carry one.
+            let item = gio::MenuItem::new(Some(&account.name.replace('_', "__")), None);
+            item.set_action_and_target_value(Some("win.account"), Some(&account.id.to_variant()));
+            self.account_menu.append_item(&item);
+        }
+        self.account_menu
+            .append(Some("Add Account…"), Some("win.account-add"));
+        self.account_menu
+            .append(Some("Sign Out"), Some("win.logout"));
+        if let Some(action) = self
+            .window
+            .lookup_action("account")
+            .and_downcast::<gio::SimpleAction>()
+        {
+            action.set_state(&active.map(|a| a.id).unwrap_or_default().to_variant());
+        }
+    }
+
+    /// Whether the session may be swapped right now, saying why not if it
+    /// may not.
+    ///
+    /// legendary reads the session when a download starts, and a game's saves
+    /// go back up under whoever is signed in when it closes. Swapping the
+    /// session under either would hand one account's work to the other.
+    fn account_free(&self) -> bool {
+        let free = self.running.borrow().is_empty() && !self.downloads.working();
+        if !free {
+            self.toast("Close running games and pause downloads before changing accounts");
+        }
+        free
+    }
+
+    fn add_account(self: &Rc<Self>) {
+        if self.account_free() {
+            self.show_login();
+        }
+    }
+
+    fn switch_account(self: &Rc<Self>, id: &str) {
+        if !self.account_free() {
+            return;
+        }
         let lgd = self.lgd.borrow().clone();
+        let id = id.to_string();
         let weak = Rc::downgrade(self);
         spawn_bg(
-            move || lgd.logout(),
+            move || accounts::switch(lgd.config_dir(), &crate::config::accounts_dir(), &id),
             move |result| {
                 let Some(this) = weak.upgrade() else {
                     return;
                 };
                 match result {
-                    Ok(()) => {
-                        this.games.borrow_mut().clear();
-                        this.populate();
-                        this.show_login();
+                    Ok(account) => {
+                        this.toast(&format!("Switched to {}", account.name));
+                        this.account_changed();
                     }
+                    Err(e) => this.toast_error("Cannot switch accounts", &e),
+                }
+            },
+        );
+    }
+
+    /// Forgets everything fetched for the account that was signed in and
+    /// loads the one that is now, or asks for a sign-in when none is left.
+    pub fn account_changed(self: &Rc<Self>) {
+        self.playtime.borrow_mut().clear();
+        self.achievements.borrow_mut().clear();
+        self.show_collections(|held| held.clear());
+        self.games.borrow_mut().clear();
+        self.populate();
+        self.fill_accounts();
+        if self.lgd.borrow().is_logged_in() {
+            self.show_library();
+            self.refresh();
+        } else {
+            self.show_login();
+        }
+    }
+
+    fn logout(self: &Rc<Self>) {
+        if !self.account_free() {
+            return;
+        }
+        let lgd = self.lgd.borrow().clone();
+        let weak = Rc::downgrade(self);
+        spawn_bg(
+            move || accounts::sign_out(&lgd),
+            move |result| {
+                let Some(this) = weak.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(Some(next)) => {
+                        this.toast(&format!("Switched to {}", next.name));
+                        this.account_changed();
+                    }
+                    Ok(None) => this.account_changed(),
                     Err(e) => this.toast_error("Sign-out failed", &e),
                 }
             },

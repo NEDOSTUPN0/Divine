@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config;
+use crate::legendary;
 use crate::models::Game;
 
 /// What can go, and what it weighs.
@@ -50,7 +51,8 @@ pub fn unused(games: &[Game], busy: &HashSet<String>) -> Sweep {
     sweep_screenshots(&crate::covers::screenshots_dir(), &pages, &mut sweep);
     sweep_manifest_sizes(&config::manifests_dir(), games, busy, &mut sweep);
     let legendary = config::legendary_config_dir();
-    sweep_metadata(&legendary, busy, &mut sweep);
+    let others = crate::accounts::slots(&config::accounts_dir());
+    sweep_metadata(&legendary, &others, busy, &mut sweep);
     sweep_manifests(&legendary, busy, &mut sweep);
     sweep
 }
@@ -168,12 +170,17 @@ fn sweep_manifest_sizes(dir: &Path, games: &[Game], busy: &HashSet<String>, swee
 }
 
 /// legendary's cached catalogue entries, one file per owned app.
-fn sweep_metadata(root: &Path, busy: &HashSet<String>, sweep: &mut Sweep) {
-    let owned = owned_app_names(root);
+fn sweep_metadata(root: &Path, others: &[PathBuf], busy: &HashSet<String>, sweep: &mut Sweep) {
+    let mut owned = legendary::owned(root);
     // An empty list means the file could not be read, not that nothing is
     // owned. Wiping the lot on that reading would be quite the bug.
     if owned.is_empty() {
         return;
+    }
+    // The metadata directory is shared by every signed-in account, and a game
+    // only the account not in use owns is still somebody's library.
+    for slot in others {
+        owned.extend(legendary::owned(slot));
     }
     for file in files_in(&root.join("metadata")) {
         let Some(app_name) = stem(&file) else {
@@ -206,29 +213,6 @@ fn sweep_manifests(root: &Path, busy: &HashSet<String>, sweep: &mut Sweep) {
             sweep.take(file);
         }
     }
-}
-
-/// Every app legendary knows the account owns, across platforms.
-fn owned_app_names(root: &Path) -> HashSet<String> {
-    let mut names = HashSet::new();
-    let Ok(text) = fs::read_to_string(root.join("assets.json")) else {
-        return names;
-    };
-    let Ok(assets) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return names;
-    };
-    for entries in assets
-        .as_object()
-        .into_iter()
-        .flat_map(|table| table.values())
-    {
-        for entry in entries.as_array().into_iter().flatten() {
-            if let Some(name) = entry.get("app_name").and_then(serde_json::Value::as_str) {
-                names.insert(name.to_string());
-            }
-        }
-    }
-    names
 }
 
 /// Manifest file names for the builds that are actually installed, spelled the
@@ -455,6 +439,29 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Two accounts share one metadata directory. A game only the account not
+    /// in use owns must survive, or switching back finds it half forgotten.
+    #[test]
+    fn another_accounts_games_keep_their_metadata() {
+        let dir = scratch("accounts");
+        let live = dir.join("live");
+        let slot = dir.join("bbbb2222");
+        fs::create_dir_all(live.join("metadata")).unwrap();
+        fs::create_dir_all(&slot).unwrap();
+        let assets = |app: &str| format!(r#"{{"Windows":[{{"app_name":"{app}"}}]}}"#);
+        fs::write(live.join("assets.json"), assets("Fowl")).unwrap();
+        fs::write(slot.join("assets.json"), assets("Kinglet")).unwrap();
+        plant(&live.join("metadata"), "Fowl.json", 10);
+        plant(&live.join("metadata"), "Kinglet.json", 10);
+        let gone = plant(&live.join("metadata"), "Sparrow.json", 10);
+
+        let mut sweep = Sweep::default();
+        sweep_metadata(&live, &[slot], &HashSet::new(), &mut sweep);
+        assert_eq!(sweep.files, vec![gone]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// What `remove` reports has to be what it actually freed, since that is
     /// the number shown afterwards.
     #[test]
@@ -478,11 +485,11 @@ mod tests {
     #[test]
     fn an_unreadable_listing_leaves_everything_alone() {
         let nowhere = Path::new("/this/does/not/exist");
-        assert!(owned_app_names(nowhere).is_empty());
+        assert!(legendary::owned(nowhere).is_empty());
         assert!(installed_builds(nowhere).is_empty());
 
         let mut sweep = Sweep::default();
-        sweep_metadata(nowhere, &HashSet::new(), &mut sweep);
+        sweep_metadata(nowhere, &[], &HashSet::new(), &mut sweep);
         sweep_manifests(nowhere, &HashSet::new(), &mut sweep);
         // Nothing was swept, because nothing could be judged.
         assert!(sweep.is_empty());

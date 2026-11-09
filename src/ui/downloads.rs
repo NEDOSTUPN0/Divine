@@ -269,6 +269,15 @@ impl Downloads {
         (titles, restartable)
     }
 
+    /// Whether anything is downloading or waiting its turn to. A paused job
+    /// runs nothing until somebody resumes it.
+    pub fn working(&self) -> bool {
+        self.jobs
+            .borrow()
+            .values()
+            .any(|job| !job.paused.get() && !job.cancelled.get())
+    }
+
     /// Downloads are children of this process, so they are stopped rather than
     /// orphaned when it exits. legendary's resume file survives, and the list
     /// written to disk brings the jobs back paused.
