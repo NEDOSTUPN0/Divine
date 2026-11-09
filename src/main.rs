@@ -14,6 +14,7 @@ mod covers;
 mod discord;
 mod disk;
 mod epic;
+mod exe_icon;
 mod gamescope;
 mod gamesdb;
 mod http;
@@ -32,6 +33,7 @@ mod running;
 mod runtimes;
 mod sdl;
 mod shim;
+mod shortcuts;
 mod ui;
 mod umu;
 

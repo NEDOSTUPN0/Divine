@@ -482,6 +482,14 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
     page.add(&advanced);
 
     dialog.add(&page);
+    // Wine Wayland, gamescope and the umu id all decide what the game's window
+    // is called, which the menu entries have to name.
+    let weak = Rc::downgrade(app);
+    dialog.connect_closed(move |_| {
+        if let Some(app) = weak.upgrade() {
+            app.sync_shortcuts();
+        }
+    });
     dialog.present(Some(&app.window));
 }
 

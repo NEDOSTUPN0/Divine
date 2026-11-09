@@ -357,6 +357,23 @@ pub fn show(app: &Rc<App>) {
         }
     });
 
+    let shortcuts = switch(
+        app,
+        "Add Games to the Applications Menu",
+        "Every installed game gets an entry of its own, which starts it without \
+         opening Divine",
+        cfg.general.shortcuts,
+        |cfg, on| cfg.general.shortcuts = on,
+    );
+    let weak = Rc::downgrade(app);
+    shortcuts.connect_active_notify(move |_| {
+        if let Some(app) = weak.upgrade() {
+            app.sync_shortcuts();
+        }
+    });
+    let shortcuts_group = adw::PreferencesGroup::builder().title("Shortcuts").build();
+    shortcuts_group.add(&shortcuts);
+
     let paths_group = adw::PreferencesGroup::builder()
         .title("Paths")
         .description("Leave a field empty to restore its default")
@@ -375,6 +392,7 @@ pub fn show(app: &Rc<App>) {
     general.add(&downloads_group);
     general.add(&proxy_group(app, &cfg));
     general.add(&tools_group);
+    general.add(&shortcuts_group);
     general.add(&paths_group);
 
     let dialog = adw::PreferencesDialog::new();
@@ -387,6 +405,14 @@ pub fn show(app: &Rc<App>) {
         &umu_bin,
         &username,
     ));
+    // Wine Wayland, gamescope and the umu id all decide what the game's window
+    // is called, which the menu entries have to name.
+    let weak = Rc::downgrade(app);
+    dialog.connect_closed(move |_| {
+        if let Some(app) = weak.upgrade() {
+            app.sync_shortcuts();
+        }
+    });
     dialog.present(Some(&app.window));
 }
 

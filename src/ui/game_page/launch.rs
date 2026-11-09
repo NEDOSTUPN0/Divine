@@ -662,6 +662,7 @@ mod tests {
             app_name: "Fowl".into(),
             title: "The Escapists 2".into(),
             install_path: "/Games/Divine/TheEscapists2".into(),
+            executable: "TheEscapists2.exe".into(),
             version: "7044".into(),
             install_size: 0,
             install_tags: Vec::new(),

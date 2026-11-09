@@ -1149,6 +1149,7 @@ impl App {
                         this.load_collections();
                         this.rebuild_game_page();
                         this.notify_watchers();
+                        this.sync_shortcuts();
                         if let Some(request) = this.pending.borrow_mut().take() {
                             this.fulfil(request);
                         }
@@ -1160,6 +1161,28 @@ impl App {
                         this.stack.set_visible_child_name("empty");
                         this.toast_error("Cannot load the library", &e);
                     }
+                }
+            },
+        );
+    }
+
+    /// Brings the applications menu in line with what is installed.
+    pub fn sync_shortcuts(self: &Rc<Self>) {
+        let lgd = self.lgd.borrow().clone();
+        let cfg = self.cfg.borrow().clone();
+        let enabled = cfg.general.shortcuts;
+        spawn_bg(
+            move || {
+                let games = if enabled {
+                    crate::shortcuts::installed(&lgd, &cfg)?
+                } else {
+                    Vec::new()
+                };
+                crate::shortcuts::sync(&games, enabled)
+            },
+            |result| {
+                if let Err(e) = result {
+                    warn!("the applications menu is out of step with the library: {e:#}");
                 }
             },
         );

@@ -122,6 +122,9 @@ pub struct InstalledEntry {
     #[serde(default)]
     pub title: String,
     pub install_path: String,
+    /// The program legendary starts, relative to the install folder.
+    #[serde(default)]
+    pub executable: String,
     #[serde(default)]
     pub version: String,
     #[serde(default)]
@@ -384,6 +387,7 @@ mod tests {
             app_name: "6b61b369".into(),
             title: "Alien: Isolation - Last Survivor".into(),
             install_path: "/games/alien".into(),
+            executable: String::new(),
             version: "1".into(),
             install_size: 1,
             install_tags: Vec::new(),
@@ -408,6 +412,7 @@ mod tests {
             app_name: "8935bb3e".into(),
             title: "Alien: Isolation".into(),
             install_path: path.display().to_string(),
+            executable: String::new(),
             version: "1".into(),
             install_size: 1,
             install_tags: Vec::new(),

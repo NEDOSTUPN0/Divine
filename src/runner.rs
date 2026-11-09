@@ -420,12 +420,40 @@ fn tuning(
 }
 
 /// The umu id a game runs under. An id the database does not know means no game
-/// fix at all, so a hand-pinned one wins.
-fn game_id(game: &Game, per_game: &crate::config::GameSettings) -> String {
+/// fix at all, so a hand-pinned one wins. Blocking: the database is asked.
+fn game_id(app_name: &str, per_game: &crate::config::GameSettings) -> String {
     match per_game.umu_id.as_str() {
-        "" => umu::game_id(&game.app_name).unwrap_or_else(|| umu::NEUTRAL_ID.to_string()),
+        "" => umu::game_id(app_name).unwrap_or_else(|| umu::own_id(app_name)),
         pinned => pinned.to_string(),
     }
+}
+
+/// The class the game's window will carry, which is how a desktop finds the
+/// entry, and so the icon, a running window belongs to. Blocking, as
+/// [`game_id`] is.
+///
+/// Read off real windows under GE-Proton: on XWayland Proton names the window
+/// `steam_app_` and the part of the umu id after "umu-"; under winewayland the
+/// app id is the program's file name in lower case. Inside gamescope the
+/// desktop only ever sees gamescope's own window, and without umu nothing sets
+/// the id, so neither gets a class.
+pub fn window_class(app_name: &str, executable: &str, cfg: &Config) -> Option<String> {
+    let per_game = cfg.game(app_name);
+    if gamescope::in_use(&per_game.gamescope) || !per_game.use_umu.unwrap_or(cfg.runner.use_umu) {
+        return None;
+    }
+    let wayland = per_game.wayland.unwrap_or(cfg.runner.wayland)
+        && std::env::var_os("WAYLAND_DISPLAY").is_some();
+    class_for(&game_id(app_name, &per_game), executable, wayland)
+}
+
+fn class_for(umu_id: &str, executable: &str, wayland: bool) -> Option<String> {
+    if wayland {
+        // legendary writes the program with either slash.
+        let file = executable.rsplit(['/', '\\']).next()?;
+        return (!file.is_empty()).then(|| file.to_lowercase());
+    }
+    Some(format!("steam_app_{}", umu_id.strip_prefix("umu-")?))
 }
 
 /// Runs a winetricks verb in a game's prefix. umu takes winetricks from the
@@ -451,7 +479,7 @@ pub fn winetricks(game: &Game, cfg: &Config, verb: &str) -> Result<()> {
         .env_remove("TEMP")
         .env("PROTONPATH", proton_setting(cfg, &per_game))
         .env("STORE", umu::STORE)
-        .env("GAMEID", game_id(game, &per_game))
+        .env("GAMEID", game_id(&game.app_name, &per_game))
         .env("WINEPREFIX", &prefix)
         .output()
         .with_context(|| format!("running {} winetricks {verb}", cfg.general.umu))?;
@@ -545,7 +573,7 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
         env.push(("PROTONPATH".into(), proton_setting.clone()));
         // The store decides which set of protonfixes umu consults.
         env.push(("STORE".into(), umu::STORE.into()));
-        env.push(("GAMEID".into(), game_id(game, &per_game)));
+        env.push(("GAMEID".into(), game_id(&game.app_name, &per_game)));
         env.push(("WINEPREFIX".into(), prefix.display().to_string()));
     } else {
         if proton_setting == LATEST_GE_PROTON {
@@ -949,9 +977,23 @@ mod tests {
         };
         // No lookup happens at all, which is the point: the database does not
         // know every game, and a hand-pinned id is the answer for those.
+        assert_eq!(game_id("Fowl", &per_game), "umu-271590");
+    }
+
+    /// The classes as GE-Proton 11-12 set them on a running window.
+    #[test]
+    fn a_window_is_named_the_way_proton_names_it() {
         assert_eq!(
-            game_id(&game("Fowl", "The Escapists 2"), &per_game),
-            "umu-271590"
+            class_for("umu-271590", "PlayGTAV.exe", false).as_deref(),
+            Some("steam_app_271590")
+        );
+        assert_eq!(
+            class_for(&umu::own_id("Fowl"), "TheEscapists2.exe", false).as_deref(),
+            Some("steam_app_egs_Fowl")
+        );
+        assert_eq!(
+            class_for("umu-271590", "Binaries\\Win64\\MixedCase.exe", true).as_deref(),
+            Some("mixedcase.exe")
         );
     }
 }

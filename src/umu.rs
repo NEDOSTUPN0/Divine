@@ -16,8 +16,21 @@ const API: &str = "https://umu.openwinecomponents.org/umu_api.php";
 
 /// The store Divine always launches from, as umu's protonfixes name it.
 pub const STORE: &str = "egs";
-/// umu's neutral id: valid, but matches no game-specific fix.
-pub const NEUTRAL_ID: &str = "umu-0";
+/// The id a game the database does not know runs under.
+///
+/// One of its own rather than umu's neutral "umu-0". umu hands everything after
+/// "umu-" to Proton as `SteamGameId`, and Proton names the game's X11 window
+/// `steam_app_<that>`: with one id for every such game, no desktop could tell
+/// their windows apart or find the entry each belongs to. protonfixes looks a
+/// fix up by this id and finds none, as it did for "umu-0". The "egs_" keeps it
+/// from ever being all digits, which Proton would take for a Steam app.
+pub fn own_id(app_name: &str) -> String {
+    let name: String = app_name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    format!("umu-egs_{name}")
+}
 
 #[derive(Deserialize)]
 struct Entry {
@@ -126,8 +139,9 @@ mod tests {
     #[test]
     fn reads_the_steam_id_out_of_a_umu_id() {
         assert_eq!(steam_app_id("umu-271590"), Some(271590));
-        // The neutral id and anything non-numeric map to no Steam game.
-        assert_eq!(steam_app_id(super::NEUTRAL_ID), None);
+        // Divine's own ids and anything non-numeric map to no Steam game.
+        assert_eq!(steam_app_id(&super::own_id("Fowl")), None);
+        assert_eq!(steam_app_id("umu-0"), None);
         assert_eq!(steam_app_id("umu-default"), None);
         assert_eq!(steam_app_id("271590"), None);
     }

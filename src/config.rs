@@ -154,6 +154,8 @@ pub struct General {
     pub prefixes_dir: PathBuf,
     /// Where builds downloaded through Divine are unpacked.
     pub proton_dir: PathBuf,
+    /// An entry in the applications menu for every installed game.
+    pub shortcuts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -587,6 +589,7 @@ impl Default for General {
             install_dir: home().join("Games").join("Divine"),
             prefixes_dir: home().join("Games").join("Prefixes"),
             proton_dir: default_proton_dir(),
+            shortcuts: true,
         }
     }
 }
