@@ -22,6 +22,7 @@ mod launch_options;
 mod legendary;
 mod log;
 mod models;
+mod play;
 mod proton;
 mod protondb;
 mod proxy;
@@ -35,7 +36,7 @@ mod ui;
 mod umu;
 
 use adw::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 
 use crate::log::{error, warn};
 
@@ -47,14 +48,45 @@ fn main() -> glib::ExitCode {
         error!("cannot prepare config directories: {e:#}");
         return glib::ExitCode::FAILURE;
     }
+
+    // A shortcut: the game and nothing else, with a log of its own so that it
+    // does not push the window's aside.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(play::LAUNCH) {
+        let Some(app_name) = args.get(2) else {
+            error!("{} needs the app name of a game", play::LAUNCH);
+            return glib::ExitCode::FAILURE;
+        };
+        if let Err(e) = log::to_file(&config::launch_log_file()) {
+            warn!("this launch will not be written down: {e:#}");
+        }
+        return glib::ExitCode::from(play::from_shortcut(app_name).clamp(0, 255) as u8);
+    }
+
     if let Err(e) = log::to_file(&config::log_file()) {
         warn!("this session will not be written down: {e:#}");
     }
 
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
     app.connect_startup(|_| load_css());
     app.connect_activate(|app| {
-        ui::window::App::build(app);
+        ui::window::App::present(app);
+    });
+    // Runs in the window's process, whichever process the line was typed in.
+    app.connect_command_line(|app, line| {
+        let args: Vec<String> = line
+            .arguments()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let window = ui::window::App::present(app);
+        if let Some(request) = ui::window::Request::parse(&args) {
+            window.request(request);
+        }
+        glib::ExitCode::SUCCESS
     });
     app.run()
 }

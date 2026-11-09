@@ -7,8 +7,6 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-use crate::legendary::SaveSync;
-use crate::log::{error, info};
 use crate::models::{human_size, Game};
 use crate::runner;
 use crate::ui::{accessible_label, downloads, spawn_bg, window::App};
@@ -173,24 +171,6 @@ fn show_move_space(
             ));
             dialog.set_response_enabled("move", true);
         }
-    }
-}
-
-/// A sync around a launch is a convenience, not a condition: if Epic is down or
-/// the game has no saves yet, the game still starts and still runs.
-pub(super) fn sync_saves(
-    lgd: &crate::legendary::Legendary,
-    app_name: &str,
-    prefix: &Path,
-    mode: SaveSync,
-) {
-    match lgd.sync_saves(app_name, prefix, mode) {
-        Ok(events) => {
-            for event in events {
-                info!("saves: {event}");
-            }
-        }
-        Err(e) => error!("cannot sync saves for {app_name}: {e:#}"),
     }
 }
 

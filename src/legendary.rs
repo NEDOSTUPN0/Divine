@@ -233,6 +233,19 @@ pub struct LaunchOutcome {
     pub log_tail: Vec<String>,
 }
 
+impl LaunchOutcome {
+    /// legendary refused because Epic has a newer build than the one on disk.
+    /// It checks right before starting (`cli.py`, `launch_game`), so this is
+    /// fresher than anything the library knew, and it says so only in its log.
+    pub fn out_of_date(&self) -> bool {
+        !self.ok
+            && self
+                .log_tail
+                .iter()
+                .any(|line| line.contains("Game is out of date"))
+    }
+}
+
 impl Legendary {
     pub fn new(cfg: &Config) -> Self {
         Self {
@@ -391,6 +404,17 @@ impl Legendary {
             .into_iter()
             .filter(|entry| entry.metadata.base_app_name().is_some())
             .collect()
+    }
+
+    /// legendary's cached entry for one app, whichever account owns it. Kept
+    /// for as long as the app is installed, so a game installed under another
+    /// account still has one.
+    pub fn cached_entry(&self, app_name: &str) -> Option<ListEntry> {
+        let path = self
+            .config_dir
+            .join("metadata")
+            .join(format!("{app_name}.json"));
+        serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
     }
 
     /// Everything legendary has cached for the active account.
@@ -1283,6 +1307,27 @@ mod tests {
     }
 
     use super::*;
+
+    /// The two lines legendary ends an out of date launch with, in its own
+    /// log format.
+    #[test]
+    fn an_out_of_date_build_is_told_apart_from_a_failed_launch() {
+        let refused = LaunchOutcome {
+            ok: false,
+            log_tail: vec![
+                "[cli] INFO: Checking for updates...".into(),
+                "[cli] ERROR: Game is out of date, please update or launch with update \
+                 check skipping!"
+                    .into(),
+            ],
+        };
+        assert!(refused.out_of_date());
+        let crashed = LaunchOutcome {
+            ok: false,
+            log_tail: vec!["[cli] ERROR: Login failed, cannot continue!".into()],
+        };
+        assert!(!crashed.out_of_date());
+    }
 
     #[test]
     fn an_ordinary_environment_is_handed_over_whole() {

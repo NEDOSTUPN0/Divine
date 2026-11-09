@@ -39,6 +39,11 @@ pub fn log_file() -> PathBuf {
     state_dir().join("divine.log")
 }
 
+/// The log of the last game started from a shortcut.
+pub fn launch_log_file() -> PathBuf {
+    state_dir().join("launch.log")
+}
+
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| home().join(".cache"))

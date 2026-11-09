@@ -4,18 +4,13 @@
 
 use std::rc::Rc;
 
-use adw::prelude::*;
-use anyhow::Context;
-
-use crate::config::GameSettings;
-use crate::legendary::{Activation, LaunchArgs, SaveSync};
-use crate::log::info;
+use crate::legendary::Activation;
 use crate::models::Game;
 use crate::runner;
 use crate::ui::{downloads, spawn_bg, window::App};
+use adw::prelude::*;
 
 use super::install::{import_dialog, install_dialog, mark_busy};
-use super::maintenance::sync_saves;
 
 pub(super) fn action_button(app: &Rc<App>, game: &Game) -> gtk::Box {
     let button = gtk::Button::builder().halign(gtk::Align::Start).build();
@@ -147,98 +142,71 @@ pub(super) fn action_button(app: &Rc<App>, game: &Game) -> gtk::Box {
             app.toast("Asked the game to close. Use Force stop if it does not.");
             return;
         }
+        play(&app, &game, false, Some(button));
+    });
 
-        let cfg = app.cfg.borrow().clone();
+    row
+}
+
+/// Starts a game from the window. `button`, when the Play button asked, shows
+/// Stop from the moment it is pressed rather than once the game is up.
+pub fn play(app: &Rc<App>, game: &Game, skip_update: bool, button: Option<&gtk::Button>) {
+    let cfg = app.cfg.borrow().clone();
+    if let Some(button) = button {
         set_playing(button, true);
-        // umu can spend several silent minutes fetching Proton and building the
-        // prefix, but only the first time. A prefix already on disk means that
-        // is behind us, so the warning stays out of the way from then on.
-        let first_run = !runner::prefix_path(&game, &cfg).join("user.reg").is_file();
-        app.toast(&if first_run {
-            format!(
-                "Launching {}. The first run can take a while while Proton is prepared.",
-                game.title
-            )
-        } else {
-            format!("Launching {}", game.title)
-        });
+    }
+    // umu can spend several silent minutes fetching Proton and building the
+    // prefix, but only the first time. A prefix already on disk means that is
+    // behind us, so the warning stays out of the way from then on.
+    let first_run = !runner::prefix_path(game, &cfg).join("user.reg").is_file();
+    app.toast(&if first_run {
+        format!(
+            "Launching {}. The first run can take a while while Proton is prepared.",
+            game.title
+        )
+    } else {
+        format!("Launching {}", game.title)
+    });
 
-        let lgd = app.lgd.borrow().clone();
-        let launch_game = game.clone();
-        let button = button.clone();
-        let weak = Rc::downgrade(&app);
-
-        let finished = game.app_name.clone();
-
-        // The worker hands back the process group as soon as it exists.
-        let (pid_tx, pid_rx) = async_channel::bounded(1);
-        let app_name = game.app_name.clone();
-        let pid_app = Rc::downgrade(&app);
-        gtk::glib::spawn_future_local(async move {
-            if let Ok(group) = pid_rx.recv().await {
-                if let Some(app) = pid_app.upgrade() {
-                    // Written down as well as held, so that a Divine restarted
-                    // while the game is up knows the game is up.
-                    crate::running::remember(&app_name, group);
-                    app.running.borrow_mut().insert(app_name, group);
-                }
+    // The worker hands back the process group as soon as it exists.
+    let (pid_tx, pid_rx) = async_channel::bounded(1);
+    let app_name = game.app_name.clone();
+    let pid_app = Rc::downgrade(app);
+    gtk::glib::spawn_future_local(async move {
+        if let Ok(group) = pid_rx.recv().await {
+            if let Some(app) = pid_app.upgrade() {
+                app.running.borrow_mut().insert(app_name, group);
+                app.rebuild_game_page();
             }
-        });
+        }
+    });
 
-        spawn_bg(
-            // Assembled on the worker thread: resolving the umu game id is a
-            // network call and must not block the UI.
-            move || {
-                let (wrapper, env) = runner::build_launch(&launch_game, &cfg)?;
-                let vars: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                info!(
-                    "launching {} with {} {}",
-                    launch_game.app_name,
-                    vars.join(" "),
-                    wrapper
-                );
-
-                let per_game = cfg.game(&launch_game.app_name);
-                let args = launch_args(&per_game, &cfg.runner.override_username)?;
-
-                // Pull first, push after: a stale cloud save must not land on
-                // top of a fresh local one, and the save just made must not be
-                // overwritten by the cloud copy either.
-                let syncing = launch_game.cloud_saves
-                    && per_game.cloud_saves.unwrap_or(cfg.runner.cloud_saves);
-                let prefix = runner::prefix_path(&launch_game, &cfg);
-                if syncing {
-                    sync_saves(&lgd, &launch_game.app_name, &prefix, SaveSync::Download);
-                }
-
-                let report = |group: i32| {
-                    let _ = pid_tx.try_send(group);
-                };
-                let account = lgd.account().map(|a| a.id).unwrap_or_default();
-                let watch = crate::epic::playtime::Watch::start(&launch_game.app_name, &account);
-                let outcome = lgd.launch(&launch_game.app_name, &wrapper, &env, &args, &report);
-                // A launch that fails leaves a session of a few seconds, which is
-                // not time played. A game that dies after an hour still counts.
-                if outcome.ok || watch.seconds() >= 60 {
-                    watch.finish(&lgd.user_file(), cfg.runner.report_playtime);
-                } else {
-                    watch.discard();
-                }
-
-                if syncing {
-                    sync_saves(&lgd, &launch_game.app_name, &prefix, SaveSync::Upload);
-                }
-                anyhow::Ok(outcome)
-            },
-            move |result| {
-                set_playing(&button, false);
-                let Some(app) = weak.upgrade() else {
-                    return;
-                };
-                app.running.borrow_mut().remove(&finished);
-                crate::running::forget(&finished);
-                match result {
-                    Ok(outcome) if !outcome.ok => {
+    let lgd = app.lgd.borrow().clone();
+    let launching = game.clone();
+    let button = button.cloned();
+    let weak = Rc::downgrade(app);
+    spawn_bg(
+        // On the worker thread: resolving the umu game id is a network call,
+        // and the rest is waiting for the game to end.
+        move || {
+            crate::play::run(&lgd, &cfg, &launching, skip_update, &|group| {
+                let _ = pid_tx.try_send(group);
+            })
+            .map(|outcome| (launching, outcome))
+        },
+        move |result| {
+            if let Some(button) = &button {
+                set_playing(button, false);
+            }
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            match result {
+                Ok((game, outcome)) => {
+                    app.running.borrow_mut().remove(&game.app_name);
+                    if outcome.out_of_date() {
+                        offer_update(&app, &game);
+                    } else if !outcome.ok {
                         let reason = outcome
                             .log_tail
                             .last()
@@ -246,14 +214,59 @@ pub(super) fn action_button(app: &Rc<App>, game: &Game) -> gtk::Box {
                             .unwrap_or_else(|| "see the terminal output".into());
                         app.toast(&format!("Launch failed: {reason}"));
                     }
-                    Ok(_) => {}
-                    Err(e) => app.toast_error("Cannot build the launch command", &e),
                 }
-            },
-        );
-    });
+                Err(e) => app.toast_error("Cannot build the launch command", &e),
+            }
+            app.rebuild_game_page();
+        },
+    );
+}
 
-    row
+/// legendary will not start a build Epic has moved past. Asked rather than
+/// done: an update can be tens of gigabytes, and an offline game often runs
+/// fine on the old build.
+pub fn offer_update(app: &Rc<App>, game: &Game) {
+    let dialog = adw::AlertDialog::new(
+        Some(&format!("Update {}?", game.title)),
+        Some(
+            "Epic has a newer build, and legendary will not start the one on disk. \
+             Playing without updating works for most games that run offline, and \
+             fails for those that need Epic's servers.",
+        ),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("play", "Play Without Updating");
+    dialog.add_response("update", "Update and Play");
+    dialog.set_response_appearance("update", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("update"));
+    dialog.set_close_response("cancel");
+
+    let weak = Rc::downgrade(app);
+    let game = game.clone();
+    dialog.choose(
+        Some(&app.window),
+        gtk::gio::Cancellable::NONE,
+        move |response| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            match response.as_str() {
+                "play" => play(&app, &game, true, None),
+                "update" => {
+                    app.then_play.borrow_mut().insert(game.app_name.clone());
+                    downloads::start(
+                        &app,
+                        &game,
+                        None,
+                        crate::legendary::InstallMode::Update,
+                        Vec::new(),
+                    );
+                    app.rebuild_game_page();
+                }
+                _ => {}
+            }
+        },
+    );
 }
 
 /// Epic sells these but does not host them, so there is no Install to offer.
@@ -357,40 +370,6 @@ fn update_replaces_play(game: &Game, running: bool, allowed_out_of_date: bool) -
     game.update_available() && !running && !allowed_out_of_date
 }
 
-/// legendary's own options, kept apart from what is meant for the game: in one
-/// list legendary would read some of the game's as its own.
-fn launch_args(per_game: &GameSettings, global_username: &str) -> anyhow::Result<LaunchArgs> {
-    let mut options: Vec<String> = Vec::new();
-    if per_game.offline {
-        options.push("--offline".into());
-    }
-    if per_game.skip_update_check {
-        options.push("--skip-version-check".into());
-    }
-    if !per_game.override_exe.is_empty() {
-        options.push("--override-exe".into());
-        options.push(per_game.override_exe.clone());
-    }
-    let username = match per_game.override_username.as_str() {
-        "" => global_username,
-        own => own,
-    };
-    if !username.is_empty() {
-        options.push("--override-username".into());
-        options.push(username.to_string());
-    }
-    if !per_game.language.is_empty() {
-        options.push("--language".into());
-        options.push(per_game.language.clone());
-    }
-    let line = crate::launch_options::parse(&per_game.launch_options)
-        .context("reading the launch options")?;
-    Ok(LaunchArgs {
-        options,
-        game: line.args,
-    })
-}
-
 /// Runs the launch as far as working out the command, then stops and shows it.
 pub(super) fn show_launch_command(app: &Rc<App>, game: &Game) {
     let cfg = app.cfg.borrow().clone();
@@ -400,7 +379,10 @@ pub(super) fn show_launch_command(app: &Rc<App>, game: &Game) {
     spawn_bg(
         move || {
             let (wrapper, env) = runner::build_launch(&owned, &cfg)?;
-            let args = launch_args(&cfg.game(&owned.app_name), &cfg.runner.override_username)?;
+            let args = crate::play::launch_args(
+                &cfg.game(&owned.app_name),
+                &cfg.runner.override_username,
+            )?;
             let printed = lgd.dry_run(&owned.app_name, &wrapper, &args)?;
             Ok::<String, anyhow::Error>(describe_launch(&env, &printed))
         },
@@ -512,14 +494,17 @@ fn launch_command_dialog(app: &Rc<App>, text: &str) {
     dialog.present(Some(&app.window));
 }
 
-/// Swaps the primary button between starting and stopping the game.
-/// Picks up games that were still running when Divine last closed.
+/// Watches the games running that this window did not start: those still up
+/// from before Divine was last closed, and those a shortcut has started since.
 ///
-/// The launch is not Divine's child any more — nothing to wait on — so the only
-/// way to learn that a game has ended is to keep looking. The look is cheap: a
-/// read of one file in `/proc`, once every few seconds.
-pub fn restore_running(app: &Rc<App>) {
-    let mut watching = crate::running::alive();
+/// Such a game is not this process's child — there is nothing to wait on — so
+/// the only way to learn that it has ended is to keep looking. The look is
+/// cheap: a read of one file in `/proc`, once every few seconds.
+pub fn adopt_running(app: &Rc<App>) {
+    let mut watching: Vec<crate::running::Live> = crate::running::alive()
+        .into_iter()
+        .filter(|game| !game.kept_here() && !app.running.borrow().contains_key(&game.app_name))
+        .collect();
     if watching.is_empty() {
         return;
     }
@@ -528,6 +513,7 @@ pub fn restore_running(app: &Rc<App>) {
             .borrow_mut()
             .insert(game.app_name.clone(), game.group);
     }
+    app.rebuild_game_page();
 
     let weak = Rc::downgrade(app);
     let mut since_mark = 0u32;
@@ -546,12 +532,12 @@ pub fn restore_running(app: &Rc<App>) {
 
         watching.retain(|game| {
             if crate::running::is_alive(game) {
-                if mark {
+                if mark && !game.kept_elsewhere() {
                     crate::epic::playtime::checkpoint(&game.app_name);
                 }
                 return true;
             }
-            ended(&app, &game.app_name);
+            ended(&app, game);
             false
         });
 
@@ -565,15 +551,19 @@ pub fn restore_running(app: &Rc<App>) {
 /// How often a game Divine did not start is checked on.
 const WATCH_EVERY: u32 = 5;
 
-/// A game Divine was watching from the outside has closed.
-fn ended(app: &Rc<App>, app_name: &str) {
-    app.running.borrow_mut().remove(app_name);
-    crate::running::forget(app_name);
-    crate::epic::playtime::close(
-        app_name,
-        &app.lgd.borrow().user_file(),
-        app.cfg.borrow().runner.report_playtime,
-    );
+/// A game Divine was watching from the outside has closed. The session is
+/// closed here only when nobody else is about to close it: a shortcut launch
+/// still up is busy syncing the saves and will close it itself.
+fn ended(app: &Rc<App>, game: &crate::running::Live) {
+    app.running.borrow_mut().remove(&game.app_name);
+    if !game.kept_elsewhere() {
+        crate::running::forget(&game.app_name);
+        crate::epic::playtime::close(
+            &game.app_name,
+            &app.lgd.borrow().user_file(),
+            app.cfg.borrow().runner.report_playtime,
+        );
+    }
     // The page for it, if it is the one open, is showing Stop.
     app.rebuild_game_page();
 }
@@ -694,56 +684,5 @@ mod tests {
             installed: true,
         });
         assert!(!update_replaces_play(&current, false, false));
-    }
-
-    #[test]
-    fn legendary_options_stay_apart_from_the_game_arguments() {
-        let per_game = GameSettings {
-            offline: true,
-            skip_update_check: true,
-            override_exe: "Binaries/Win64/game.exe".into(),
-            language: "ru".into(),
-            launch_options: "mangohud %command% -dx11 -windowed".into(),
-            ..GameSettings::default()
-        };
-        let args = launch_args(&per_game, "").expect("building the arguments");
-        assert_eq!(
-            args.options,
-            [
-                "--offline",
-                "--skip-version-check",
-                "--override-exe",
-                "Binaries/Win64/game.exe",
-                "--language",
-                "ru",
-            ]
-        );
-        assert_eq!(args.game, ["-dx11", "-windowed"]);
-
-        let none = launch_args(&GameSettings::default(), "").expect("building the arguments");
-        assert!(none.options.is_empty() && none.game.is_empty());
-    }
-
-    #[test]
-    fn a_game_name_beats_the_global_one() {
-        let global = "Anonymous";
-        let none = GameSettings::default();
-        let options = |settings: &GameSettings, global: &str| {
-            launch_args(settings, global)
-                .expect("building the arguments")
-                .options
-        };
-        assert_eq!(options(&none, global), ["--override-username", "Anonymous"]);
-
-        let own = GameSettings {
-            override_username: "Someone Else".into(),
-            ..GameSettings::default()
-        };
-        assert_eq!(
-            options(&own, global),
-            ["--override-username", "Someone Else"]
-        );
-        // Neither set leaves the argument off, so legendary uses the real name.
-        assert!(options(&none, "").is_empty());
     }
 }

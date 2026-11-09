@@ -10,6 +10,12 @@
 //! What is written down is the group and when its leader started. The group id
 //! alone would not do: process ids come round again, and a launcher offering to
 //! stop whatever inherited the number would kill something it never started.
+//!
+//! A game can be started by the window or by `divine --launch` from a shortcut,
+//! two separate processes. Whichever started it waits on it and keeps its books
+//! — the play session, the saves going back up — and is written down as its
+//! keeper, so that the other only watches. Once the keeper is gone, whoever is
+//! left takes the books over.
 
 use std::fs;
 use std::path::PathBuf;
@@ -25,6 +31,49 @@ pub struct Live {
     /// The leader's start time in clock ticks since boot, straight out of
     /// `/proc`. Together with the pid it names one particular process.
     pub since: u64,
+    /// The Divine process waiting on the game. Absent in entries written
+    /// before there could be more than one.
+    #[serde(default)]
+    pub keeper: Option<Process>,
+}
+
+/// One particular process: its pid and when it started, for the same reason
+/// as the game's own.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Process {
+    pub pid: i32,
+    pub since: u64,
+}
+
+impl Process {
+    pub fn this() -> Option<Self> {
+        let pid = std::process::id() as i32;
+        Some(Process {
+            pid,
+            since: started_at(pid)?,
+        })
+    }
+
+    fn is_alive(&self) -> bool {
+        started_at(self.pid) == Some(self.since)
+    }
+}
+
+impl Live {
+    /// Whether this process is the one keeping the game's books.
+    pub fn kept_here(&self) -> bool {
+        self.keeper
+            .as_ref()
+            .is_some_and(|keeper| Some(keeper) == Process::this().as_ref())
+    }
+
+    /// Whether another Divine process is still keeping the game's books, so
+    /// that this one must leave them alone.
+    pub fn kept_elsewhere(&self) -> bool {
+        self.keeper
+            .as_ref()
+            .is_some_and(|keeper| keeper.is_alive() && !self.kept_here())
+    }
 }
 
 /// Writes down a game that has just started.
@@ -40,6 +89,7 @@ pub fn remember(app_name: &str, group: i32) {
         app_name: app_name.to_string(),
         group,
         since,
+        keeper: Process::this(),
     });
     save(&live);
 }
@@ -99,7 +149,7 @@ fn save(live: &[Live]) {
     }
 }
 
-fn state_file() -> PathBuf {
+pub fn state_file() -> PathBuf {
     crate::config::config_dir().join("running.json")
 }
 
@@ -118,6 +168,7 @@ mod tests {
             app_name: "fowl".into(),
             group: mine,
             since,
+            keeper: None,
         }));
 
         // The same pid with a different start time is a different process, and
@@ -126,6 +177,7 @@ mod tests {
             app_name: "fowl".into(),
             group: mine,
             since: since + 1,
+            keeper: None,
         }));
     }
 
@@ -138,6 +190,32 @@ mod tests {
             app_name: "fowl".into(),
             group: 0,
             since: 1,
+            keeper: None,
         }));
+    }
+
+    /// The window must not close a session a shortcut launch is still keeping,
+    /// and must take it over once that launch has died.
+    #[test]
+    fn only_a_living_keeper_elsewhere_holds_the_books() {
+        let here = Process::this().unwrap();
+        let game = |keeper| Live {
+            app_name: "fowl".into(),
+            group: here.pid,
+            since: here.since,
+            keeper,
+        };
+        assert!(game(Some(here.clone())).kept_here());
+        assert!(!game(Some(here.clone())).kept_elsewhere());
+        // A keeper that has gone, or none written down at all.
+        let gone = Process { pid: 0, since: 1 };
+        assert!(!game(Some(gone)).kept_elsewhere());
+        assert!(!game(None).kept_elsewhere());
+        // init stands in for another Divine that is still up.
+        let other = Process {
+            pid: 1,
+            since: started_at(1).unwrap(),
+        };
+        assert!(game(Some(other)).kept_elsewhere());
     }
 }

@@ -966,6 +966,8 @@ fn finish(app: &Rc<App>, job: &Rc<Job>, result: anyhow::Result<InstallEnd>) {
     }
 
     remove(app, job);
+    // Asked for by "Update and Play"; only a finished update gets to play.
+    let then_play = app.then_play.borrow_mut().remove(&job.app_name);
     if job.cancelled.get() {
         clear_after_cancel(app, job);
     }
@@ -996,6 +998,17 @@ fn finish(app: &Rc<App>, job: &Rc<Job>, result: anyhow::Result<InstallEnd>) {
                 );
                 // Reloading the library rebuilds the open game page with it.
                 app.refresh();
+                // The build on disk is what legendary checks, so the game
+                // starts without waiting for the library to catch up.
+                let game = app
+                    .games
+                    .borrow()
+                    .iter()
+                    .find(|game| game.app_name == job.app_name)
+                    .cloned();
+                if let (true, Some(game)) = (then_play, game) {
+                    crate::ui::game_page::play(app, &game, false, None);
+                }
                 return;
             }
             Ok(InstallEnd::Interrupted) => app.toast(&format!("{} stopped", job.title)),

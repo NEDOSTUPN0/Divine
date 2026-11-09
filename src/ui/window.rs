@@ -13,6 +13,7 @@ use crate::epic::collections;
 use crate::legendary::Legendary;
 use crate::log::{error, warn};
 use crate::models::{self, Game};
+use crate::play::Handover;
 use crate::runner::{self, Runner};
 use crate::ui::downloads::Downloads;
 use crate::ui::{accessible_label, game_card, game_page, login, preferences, spawn_bg};
@@ -116,14 +117,88 @@ pub struct App {
     pub achievements: RefCell<HashMap<String, Option<crate::epic::achievements::Progress>>>,
     /// Set once the question about closing mid-download has been answered.
     quitting: Cell<bool>,
+    /// Games to start as soon as their update finishes.
+    pub then_play: RefCell<HashSet<String>>,
+    /// What a shortcut asked for before the library was there to answer it.
+    pending: RefCell<Option<Request>>,
+    /// Kept alive for as long as the window, so that a game a shortcut starts
+    /// shows up here as running.
+    running_monitor: OnceCell<gio::FileMonitor>,
     /// Callbacks run whenever the library reloads. Anything floating above the
     /// window (the add-ons dialog) redraws itself from here; returning false
     /// drops the callback, which is how a closed dialog unsubscribes.
     watchers: RefCell<Vec<Watcher>>,
 }
 
+/// What the window is asked to do for one game: open its page, and when a
+/// shortcut could not go on, say why or offer the update it needs.
+pub struct Request {
+    pub app_name: String,
+    pub handover: Option<Handover>,
+}
+
+impl Request {
+    /// `--game <app_name>`, then `--update` or `--problem <text>`; the line
+    /// [`crate::play`] hands over with.
+    pub fn parse(args: &[String]) -> Option<Self> {
+        let at = args.iter().position(|arg| arg == "--game")?;
+        let app_name = args.get(at + 1)?.clone();
+        let rest = &args[at + 2..];
+        let handover = match rest.first().map(String::as_str) {
+            Some("--update") => Some(Handover::Update),
+            Some("--problem") => Some(Handover::Problem(rest.get(1).cloned().unwrap_or_default())),
+            _ => None,
+        };
+        Some(Request { app_name, handover })
+    }
+}
+
 impl App {
-    pub fn build(application: &adw::Application) -> Rc<Self> {
+    /// The window, built the first time it is asked for. A second `divine`
+    /// brings the one already open forward rather than opening another, which
+    /// would run a second download list over the same downloads.
+    pub fn present(application: &adw::Application) -> Rc<Self> {
+        if let Some(open) = LIVE.with(|live| live.borrow().first().cloned()) {
+            open.window.present();
+            return open;
+        }
+        Self::build(application)
+    }
+
+    /// Carries out a request now if the library is loaded, or once it is.
+    pub fn request(self: &Rc<Self>, request: Request) {
+        if self.games.borrow().is_empty() {
+            *self.pending.borrow_mut() = Some(request);
+        } else {
+            self.fulfil(request);
+        }
+    }
+
+    fn fulfil(self: &Rc<Self>, request: Request) {
+        let index = self
+            .games
+            .borrow()
+            .iter()
+            .position(|game| game.app_name == request.app_name);
+        let game = index.and_then(|index| self.games.borrow().get(index).cloned());
+        if let (Some(index), Some(library)) = (index, self.library_page.get()) {
+            self.nav.pop_to_page(library);
+            self.open_game(index);
+        }
+        match (request.handover, game) {
+            (Some(Handover::Update), Some(game)) => game_page::offer_update(self, &game),
+            (Some(Handover::Problem(text)), game) => {
+                let title = game.map_or(request.app_name, |game| game.title);
+                let dialog =
+                    adw::AlertDialog::new(Some(&format!("{title} did not start")), Some(&text));
+                dialog.add_response("close", "Close");
+                dialog.present(Some(&self.window));
+            }
+            _ => {}
+        }
+    }
+
+    fn build(application: &adw::Application) -> Rc<Self> {
         let cfg = Config::load();
         // Before anything goes out, so the first request already takes the
         // route the user chose.
@@ -203,6 +278,9 @@ impl App {
             playtime: RefCell::new(HashMap::new()),
             achievements: RefCell::new(HashMap::new()),
             quitting: Cell::new(false),
+            then_play: RefCell::new(HashSet::new()),
+            pending: RefCell::new(None),
+            running_monitor: OnceCell::new(),
             watchers: RefCell::new(Vec::new()),
         });
 
@@ -230,8 +308,23 @@ impl App {
         // still downloading now is stopped rather than orphaned on the way out.
         crate::ui::downloads::restore(&this);
         // A game started before Divine was last closed may still be up, and the
-        // page for it should offer Stop rather than a second Play.
-        game_page::restore_running(&this);
+        // page for it should offer Stop rather than a second Play. So should a
+        // game a shortcut starts while the window is open.
+        game_page::adopt_running(&this);
+        match gio::File::for_path(crate::running::state_file())
+            .monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
+        {
+            Ok(monitor) => {
+                let weak = Rc::downgrade(&this);
+                monitor.connect_changed(move |_, _, _, _| {
+                    if let Some(app) = weak.upgrade() {
+                        game_page::adopt_running(&app);
+                    }
+                });
+                let _ = this.running_monitor.set(monitor);
+            }
+            Err(e) => warn!("cannot watch for games started from shortcuts: {e:#}"),
+        }
         // umu fetches Proton in the middle of a launch; this is what makes that
         // visible instead of the game just taking longer.
         crate::ui::downloads::watch_proton(&this);
@@ -1056,6 +1149,9 @@ impl App {
                         this.load_collections();
                         this.rebuild_game_page();
                         this.notify_watchers();
+                        if let Some(request) = this.pending.borrow_mut().take() {
+                            this.fulfil(request);
+                        }
                         if let Some(warning) = warning {
                             this.toast(&warning);
                         }
