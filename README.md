@@ -80,6 +80,11 @@ The boring half, which is most of what you actually use:
 - **Games you already have** can be picked up where they are instead of
   downloaded twice, whether you installed them with Heroic, with Legendary, or
   by hand.
+- **Shortcuts.** Every installed game gets its own entry in the applications
+  menu, and any of them can be added to Steam, art included. Either way the
+  game starts without opening Divine, and its playtime and saves are looked
+  after all the same. When Epic has an update the game cannot start without,
+  Divine opens and asks.
 - **Per-game settings**, for when one game needs something the rest of your
   library doesn't.
 - **A log viewer**, for the evening a game won't start and you need to know

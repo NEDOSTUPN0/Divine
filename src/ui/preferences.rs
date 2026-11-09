@@ -371,7 +371,10 @@ pub fn show(app: &Rc<App>) {
             app.sync_shortcuts();
         }
     });
-    let shortcuts_group = adw::PreferencesGroup::builder().title("Shortcuts").build();
+    let shortcuts_group = adw::PreferencesGroup::builder()
+        .title("Shortcuts")
+        .description("Games added to Steam from their own page stay there either way")
+        .build();
     shortcuts_group.add(&shortcuts);
 
     let paths_group = adw::PreferencesGroup::builder()

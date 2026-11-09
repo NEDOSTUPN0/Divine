@@ -174,6 +174,50 @@ fn show_move_space(
     }
 }
 
+/// Puts the game in the Steam library, so it can be started from there and
+/// from Steam's game mode.
+pub(super) fn add_to_steam(app: &Rc<App>, game: &Game) {
+    let Some(installed) = game.installed.clone() else {
+        return;
+    };
+    let lgd = app.lgd.borrow().clone();
+    let cfg = app.cfg.borrow().clone();
+    let weak = Rc::downgrade(app);
+    let title = game.title.clone();
+    spawn_bg(
+        move || crate::steam::add(&crate::shortcuts::Shortcut::new(&lgd, &cfg, &installed)),
+        move |result| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(()) => app.toast(&format!("Added {title} to Steam")),
+                Err(e) => app.toast_error("Cannot add to Steam", &e),
+            }
+            app.rebuild_game_page();
+        },
+    );
+}
+
+pub(super) fn remove_from_steam(app: &Rc<App>, game: &Game) {
+    let app_name = game.app_name.clone();
+    let title = game.title.clone();
+    let weak = Rc::downgrade(app);
+    spawn_bg(
+        move || crate::steam::remove(&app_name),
+        move |result| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(()) => app.toast(&format!("Removed {title} from Steam")),
+                Err(e) => app.toast_error("Cannot remove from Steam", &e),
+            }
+            app.rebuild_game_page();
+        },
+    );
+}
+
 /// Checks the installed files against Epic's manifest, and offers to redownload
 /// whatever no longer matches.
 pub(super) fn verify_files(app: &Rc<App>, game: &Game) {

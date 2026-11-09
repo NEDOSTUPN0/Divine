@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -333,6 +334,16 @@ fn icons_dir() -> PathBuf {
 
 fn icon_path(app_name: &str) -> PathBuf {
     icons_dir().join(format!("{app_name}.png"))
+}
+
+/// Removes a file Divine made, where having nothing to remove is fine.
+pub fn remove_if_there(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

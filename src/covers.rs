@@ -100,7 +100,24 @@ pub fn fetch(cover: &Cover) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Downloads art at the size `query` asks Epic's CDN for, to `stem` plus the
+/// extension its content calls for: some readers, Steam's among them, go by
+/// the name rather than the bytes.
+pub fn save(url: &str, query: &str, stem: &std::path::Path) -> Result<()> {
+    let bytes = fetch_bytes(&format!("{}{query}", escape_url(url)))?;
+    let ext = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png"
+    } else {
+        "jpg"
+    };
+    write(&bytes, &stem.with_extension(ext))
+}
+
 fn download(url: &str, path: &std::path::Path) -> Result<()> {
+    write(&fetch_bytes(url)?, path)
+}
+
+fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
     let mut body = http::agent(Duration::from_secs(30))
         .get(url)
         .call()
@@ -112,11 +129,14 @@ fn download(url: &str, path: &std::path::Path) -> Result<()> {
         .take(MAX_BYTES)
         .read_to_end(&mut bytes)
         .context("reading image")?;
+    Ok(bytes)
+}
 
+fn write(bytes: &[u8], path: &std::path::Path) -> Result<()> {
     // Write beside the target first so a killed download never leaves a
     // truncated file in the cache.
     let tmp = path.with_extension("part");
-    fs::write(&tmp, &bytes)?;
+    fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path)?;
     Ok(())
 }

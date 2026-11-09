@@ -34,6 +34,7 @@ mod runtimes;
 mod sdl;
 mod shim;
 mod shortcuts;
+mod steam;
 mod ui;
 mod umu;
 

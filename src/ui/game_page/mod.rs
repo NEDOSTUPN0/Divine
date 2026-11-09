@@ -27,7 +27,9 @@ use self::fixes::fixes_group;
 use self::install::{components_dialog, dlc_dialog, tags_size};
 use self::launch::{action_button, force_stop};
 pub use self::launch::{adopt_running, offer_update, play};
-use self::maintenance::{confirm_uninstall, move_dialog, sync_saves_now, verify_files};
+use self::maintenance::{
+    add_to_steam, confirm_uninstall, move_dialog, remove_from_steam, sync_saves_now, verify_files,
+};
 use self::settings::{details_group, settings_dialog};
 use self::store::{stars_row, store_section};
 
@@ -146,6 +148,13 @@ pub fn page(app: &Rc<App>, index: usize) -> Option<adw::NavigationPage> {
         menu.append(Some("Move…"), Some("game.move"));
         if game.cloud_saves {
             menu.append(Some("Sync Saves"), Some("game.sync-saves"));
+        }
+        if crate::steam::found() {
+            if crate::steam::has(&game.app_name) {
+                menu.append(Some("Remove from Steam"), Some("game.steam-remove"));
+            } else {
+                menu.append(Some("Add to Steam"), Some("game.steam-add"));
+            }
         }
         menu.append(Some("Uninstall…"), Some("game.uninstall"));
         menu.append(Some("Force Stop"), Some("game.force-stop"));
@@ -451,6 +460,8 @@ fn menu_actions(app: &Rc<App>, game: &Game) -> gio::SimpleActionGroup {
         ("move", move_dialog),
         ("sync-saves", sync_saves_now),
         ("uninstall", confirm_uninstall),
+        ("steam-add", add_to_steam),
+        ("steam-remove", remove_from_steam),
     ] {
         let action = gio::SimpleAction::new(name, None);
         action.set_enabled(!(missing && needs_folder.contains(&name)));
