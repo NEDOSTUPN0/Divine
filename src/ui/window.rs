@@ -124,11 +124,33 @@ pub struct App {
     /// Kept alive for as long as the window, so that a game a shortcut starts
     /// shows up here as running.
     running_monitor: OnceCell<gio::FileMonitor>,
+    /// The icon in the system tray, while the settings ask for one.
+    tray: RefCell<Option<crate::tray::Tray>>,
+    /// What each line of the tray menu does, in the order the lines are in.
+    tray_actions: RefCell<Vec<Option<TrayAction>>>,
+    /// Set while the window is away because a game started, so that it comes
+    /// back when the game is over and not otherwise.
+    pub hidden_for_game: Cell<bool>,
+    /// Quit was picked from the tray, which means quit, not hide.
+    quit_asked: Cell<bool>,
     /// Callbacks run whenever the library reloads. Anything floating above the
     /// window (the add-ons dialog) redraws itself from here; returning false
     /// drops the callback, which is how a closed dialog unsubscribes.
     watchers: RefCell<Vec<Watcher>>,
 }
+
+/// What a line of the tray menu does.
+#[derive(Debug, Clone)]
+enum TrayAction {
+    ShowOrHide,
+    Stop(String),
+    Play(String),
+    Preferences,
+    Quit,
+}
+
+/// How many recently played games the tray offers.
+const TRAY_RECENT: usize = 5;
 
 /// What the window is asked to do for one game: open its page, and when a
 /// shortcut could not go on, say why or offer the update it needs.
@@ -281,6 +303,10 @@ impl App {
             then_play: RefCell::new(HashSet::new()),
             pending: RefCell::new(None),
             running_monitor: OnceCell::new(),
+            tray: RefCell::new(None),
+            tray_actions: RefCell::new(Vec::new()),
+            hidden_for_game: Cell::new(false),
+            quit_asked: Cell::new(false),
             watchers: RefCell::new(Vec::new()),
         });
 
@@ -290,10 +316,19 @@ impl App {
             let Some(app) = weak.upgrade() else {
                 return glib::Propagation::Proceed;
             };
-            // Closing on top of a download is almost always a slip, and for a
-            // component change it costs the whole thing, so it is asked about.
-            if !app.quitting.get() && confirm_quit(&app) {
-                return glib::Propagation::Stop;
+            if !app.quitting.get() {
+                let to_tray = app.tray.borrow().is_some() && !app.quit_asked.get();
+                if to_tray && app.cfg.borrow().tray.hide_on_close {
+                    app.window.set_visible(false);
+                    return glib::Propagation::Stop;
+                }
+                app.quit_asked.set(false);
+                // Closing on top of a download is almost always a slip, and for
+                // a component change it costs the whole thing, so it is asked
+                // about.
+                if confirm_quit(&app, to_tray) {
+                    return glib::Propagation::Stop;
+                }
             }
             app.remember_size();
             LIVE.with(|live| live.borrow_mut().retain(|a| !Rc::ptr_eq(a, &app)));
@@ -301,6 +336,14 @@ impl App {
         });
 
         this.install_actions();
+        this.sync_tray();
+        // The tray menu offers whichever of Show and Hide makes sense now.
+        let weak = Rc::downgrade(&this);
+        this.window.connect_visible_notify(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.refresh_tray();
+            }
+        });
         this.build_main_view();
         this.window.present();
 
@@ -1150,6 +1193,7 @@ impl App {
                         this.rebuild_game_page();
                         this.notify_watchers();
                         this.sync_shortcuts();
+                        this.refresh_tray();
                         if let Some(request) = this.pending.borrow_mut().take() {
                             this.fulfil(request);
                         }
@@ -1164,6 +1208,179 @@ impl App {
                 }
             },
         );
+    }
+
+    /// Puts the tray icon up, or takes it down, as the settings say.
+    pub fn sync_tray(self: &Rc<Self>) {
+        let wanted = self.cfg.borrow().tray.enabled;
+        if wanted == self.tray.borrow().is_some() {
+            return;
+        }
+        if !wanted {
+            *self.tray.borrow_mut() = None;
+            // Nothing would be left to bring a hidden window back with.
+            self.window.present();
+            return;
+        }
+        let shown = Rc::downgrade(self);
+        let picked = Rc::downgrade(self);
+        let (entries, actions) = self.tray_menu();
+        *self.tray_actions.borrow_mut() = actions;
+        let tray = crate::tray::Tray::new(
+            "Divine",
+            entries,
+            move || {
+                if let Some(app) = shown.upgrade() {
+                    app.window.present();
+                }
+            },
+            move |index| {
+                if let Some(app) = picked.upgrade() {
+                    app.tray_pick(index);
+                }
+            },
+        );
+        match tray {
+            Ok(tray) => *self.tray.borrow_mut() = Some(tray),
+            Err(e) => warn!("no icon in the tray: {e:#}"),
+        }
+    }
+
+    /// Redraws the tray menu from how things are now. Called whenever any of
+    /// it may have changed: the window shown or hidden, a game started or
+    /// over, the library loaded.
+    pub fn refresh_tray(&self) {
+        if self.tray.borrow().is_none() {
+            return;
+        }
+        let (entries, actions) = self.tray_menu();
+        *self.tray_actions.borrow_mut() = actions;
+        if let Some(tray) = self.tray.borrow().as_ref() {
+            tray.set_entries(entries);
+        }
+    }
+
+    /// The tray menu: showing or hiding the window, a Stop for each game
+    /// running, the games played last, then Preferences and Quit. A section
+    /// with nothing in it is left out, separator and all.
+    fn tray_menu(&self) -> (Vec<crate::tray::Entry>, Vec<Option<TrayAction>>) {
+        use crate::tray::Entry;
+
+        let games = self.games.borrow();
+        let title = |app_name: &str| {
+            games
+                .iter()
+                .find(|game| game.app_name == app_name)
+                .map_or_else(|| app_name.to_string(), |game| game.title.clone())
+        };
+        let running: Vec<String> = self.running.borrow().keys().cloned().collect();
+        let recent: Vec<String> = crate::recent::list()
+            .into_iter()
+            .filter(|app_name| !running.contains(app_name))
+            .filter(|app_name| {
+                games
+                    .iter()
+                    .any(|game| &game.app_name == app_name && game.is_installed())
+            })
+            .take(TRAY_RECENT)
+            .collect();
+
+        let toggle = if self.window.is_visible() {
+            "Hide Divine"
+        } else {
+            "Show Divine"
+        };
+        let sections: [Vec<(String, TrayAction)>; 4] = [
+            vec![(toggle.to_string(), TrayAction::ShowOrHide)],
+            running
+                .into_iter()
+                .map(|app_name| {
+                    (
+                        format!("Stop {}", title(&app_name)),
+                        TrayAction::Stop(app_name),
+                    )
+                })
+                .collect(),
+            recent
+                .into_iter()
+                .map(|app_name| (title(&app_name), TrayAction::Play(app_name)))
+                .collect(),
+            vec![
+                ("Preferences".to_string(), TrayAction::Preferences),
+                ("Quit".to_string(), TrayAction::Quit),
+            ],
+        ];
+
+        let mut entries = Vec::new();
+        let mut actions = Vec::new();
+        for section in sections.into_iter().filter(|section| !section.is_empty()) {
+            if !entries.is_empty() {
+                entries.push(Entry::Separator);
+                actions.push(None);
+            }
+            for (label, action) in section {
+                entries.push(Entry::Item(label));
+                actions.push(Some(action));
+            }
+        }
+        (entries, actions)
+    }
+
+    fn tray_pick(self: &Rc<Self>, index: usize) {
+        let Some(Some(action)) = self.tray_actions.borrow().get(index).cloned() else {
+            return;
+        };
+        match action {
+            TrayAction::ShowOrHide if self.window.is_visible() => self.window.set_visible(false),
+            TrayAction::ShowOrHide => self.window.present(),
+            TrayAction::Stop(app_name) => {
+                if let Some(group) = self.running.borrow().get(&app_name).copied() {
+                    crate::legendary::stop(group, false);
+                }
+            }
+            TrayAction::Play(app_name) => {
+                let game = self
+                    .games
+                    .borrow()
+                    .iter()
+                    .find(|game| game.app_name == app_name)
+                    .cloned();
+                if let Some(game) = game {
+                    game_page::play(self, &game, false, None);
+                }
+            }
+            TrayAction::Preferences => {
+                self.window.present();
+                preferences::show(self);
+            }
+            TrayAction::Quit => self.quit(),
+        }
+    }
+
+    /// Closes for good rather than to the tray, still asking about downloads,
+    /// which needs the window to be there to ask in.
+    fn quit(self: &Rc<Self>) {
+        self.quit_asked.set(true);
+        if !self.downloads.in_flight().0.is_empty() {
+            self.window.present();
+        }
+        self.window.close();
+    }
+
+    /// Hides the window for a game that has just started, if asked to.
+    pub fn hide_for_game(&self) {
+        if self.tray.borrow().is_some() && self.cfg.borrow().tray.hide_on_launch {
+            self.hidden_for_game.set(true);
+            self.window.set_visible(false);
+        }
+    }
+
+    /// Brings back a window that went away for a game, once none is running.
+    pub fn back_from_game(&self) {
+        if self.hidden_for_game.get() && self.running.borrow().is_empty() {
+            self.hidden_for_game.set(false);
+            self.window.present();
+        }
     }
 
     /// Brings the applications menu in line with what is installed.
@@ -1466,7 +1683,7 @@ fn loading_page() -> gtk::Widget {
 /// Asks before closing while something is downloading. Answers true when the
 /// window should stay open: either because the question is now on screen, or
 /// because the person said to keep downloading.
-fn confirm_quit(app: &Rc<App>) -> bool {
+fn confirm_quit(app: &Rc<App>, offer_tray: bool) -> bool {
     let (titles, restartable) = app.downloads.in_flight();
     if titles.is_empty() {
         return false;
@@ -1485,6 +1702,11 @@ fn confirm_quit(app: &Rc<App>) -> bool {
 
     let dialog = adw::AlertDialog::new(Some("Close while downloading?"), Some(&body));
     dialog.add_response("stay", "Keep downloading");
+    // With an icon in the tray, the window can go and the downloads stay.
+    if offer_tray {
+        dialog.add_response("hide", "Hide to Tray");
+        dialog.set_response_appearance("hide", adw::ResponseAppearance::Suggested);
+    }
     dialog.add_response("close", "Close anyway");
     dialog.set_response_appearance("close", adw::ResponseAppearance::Destructive);
     dialog.set_default_response(Some("stay"));
@@ -1492,12 +1714,16 @@ fn confirm_quit(app: &Rc<App>) -> bool {
 
     let weak = Rc::downgrade(app);
     dialog.choose(Some(&app.window), gio::Cancellable::NONE, move |response| {
-        if response != "close" {
+        let Some(app) = weak.upgrade() else {
             return;
-        }
-        if let Some(app) = weak.upgrade() {
-            app.quitting.set(true);
-            app.window.close();
+        };
+        match response.as_str() {
+            "hide" => app.window.set_visible(false),
+            "close" => {
+                app.quitting.set(true);
+                app.window.close();
+            }
+            _ => {}
         }
     });
     true

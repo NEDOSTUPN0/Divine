@@ -28,6 +28,7 @@ mod programs;
 mod proton;
 mod protondb;
 mod proxy;
+mod recent;
 mod relay;
 mod runner;
 mod running;
@@ -36,6 +37,7 @@ mod sdl;
 mod shim;
 mod shortcuts;
 mod steam;
+mod tray;
 mod ui;
 mod umu;
 

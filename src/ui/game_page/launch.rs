@@ -177,6 +177,8 @@ pub fn play(app: &Rc<App>, game: &Game, skip_update: bool, button: Option<&gtk::
             if let Some(app) = pid_app.upgrade() {
                 app.running.borrow_mut().insert(app_name, group);
                 app.rebuild_game_page();
+                app.refresh_tray();
+                app.hide_for_game();
             }
         }
     });
@@ -204,6 +206,14 @@ pub fn play(app: &Rc<App>, game: &Game, skip_update: bool, button: Option<&gtk::
             match result {
                 Ok((game, outcome)) => {
                     app.running.borrow_mut().remove(&game.app_name);
+                    app.refresh_tray();
+                    // Before saying anything, so that it is said in a window.
+                    app.back_from_game();
+                    // Started from the tray with the window away, a failure
+                    // would otherwise be told to nobody.
+                    if !outcome.ok && !app.window.is_visible() {
+                        app.window.present();
+                    }
                     if outcome.out_of_date() {
                         offer_update(&app, &game);
                     } else if !outcome.ok {
@@ -215,7 +225,10 @@ pub fn play(app: &Rc<App>, game: &Game, skip_update: bool, button: Option<&gtk::
                         app.toast(&format!("Launch failed: {reason}"));
                     }
                 }
-                Err(e) => app.toast_error("Cannot build the launch command", &e),
+                Err(e) => {
+                    app.back_from_game();
+                    app.toast_error("Cannot build the launch command", &e);
+                }
             }
             app.rebuild_game_page();
         },
@@ -514,6 +527,7 @@ pub fn adopt_running(app: &Rc<App>) {
             .insert(game.app_name.clone(), game.group);
     }
     app.rebuild_game_page();
+    app.refresh_tray();
 
     let weak = Rc::downgrade(app);
     let mut since_mark = 0u32;
@@ -566,6 +580,7 @@ fn ended(app: &Rc<App>, game: &crate::running::Live) {
     }
     // The page for it, if it is the one open, is showing Stop.
     app.rebuild_game_page();
+    app.refresh_tray();
 }
 
 /// Swaps the button between starting and stopping the game.

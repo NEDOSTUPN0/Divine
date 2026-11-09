@@ -13,13 +13,21 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+use std::thread;
+
 use anyhow::{Context, Result};
+use gtk::{gio, glib};
 
 use crate::config::{Config, GameSettings};
 use crate::legendary::{LaunchArgs, LaunchOutcome, Legendary, SaveSync};
 use crate::log::{error, info, warn};
 use crate::models::{self, Game};
 use crate::runner;
+use crate::tray::{Entry, Tray};
 
 /// The flag shortcuts start Divine with.
 pub const LAUNCH: &str = "--launch";
@@ -60,6 +68,9 @@ pub fn run(
         sync_saves(lgd, &game.app_name, &prefix, SaveSync::Download);
     }
 
+    if let Err(e) = crate::recent::played(&game.app_name) {
+        warn!("cannot note {} as played: {e:#}", game.title);
+    }
     let account = lgd.account().map(|a| a.id).unwrap_or_default();
     let watch = crate::epic::playtime::Watch::start(&game.app_name, &account);
     let _programs = game
@@ -234,7 +245,12 @@ pub fn from_shortcut(app_name: &str) -> i32 {
         return 0;
     }
 
-    match run(&lgd, &cfg, &game, false, &|_| {}) {
+    let outcome = if cfg.tray.enabled {
+        run_in_tray(lgd, cfg, game)
+    } else {
+        run(&lgd, &cfg, &game, false, &|_| {})
+    };
+    match outcome {
         Ok(outcome) if outcome.ok => 0,
         Ok(outcome) if outcome.out_of_date() => hand_over(app_name, Handover::Update),
         Ok(outcome) => {
@@ -249,6 +265,95 @@ pub fn from_shortcut(app_name: &str) -> i32 {
             error!("cannot launch {app_name}: {e:#}");
             hand_over(app_name, Handover::Problem(format!("{e:#}")))
         }
+    }
+}
+
+/// [`run`], with an icon in the tray for as long as the game is up.
+///
+/// The icon stays away while the window is open: the window has its own and
+/// shows the game as running. It is the window's bus name that says so, which
+/// comes and goes with it, so the icon follows the window both ways.
+fn run_in_tray(lgd: Legendary, cfg: Config, game: Game) -> Result<LaunchOutcome> {
+    let group = Arc::new(AtomicI32::new(0));
+    let (done, finished) = async_channel::bounded(1);
+    let title = game.title.clone();
+    let started = Arc::clone(&group);
+    thread::spawn(move || {
+        let outcome = run(&lgd, &cfg, &game, false, &|leader| {
+            started.store(leader, Ordering::SeqCst)
+        });
+        let _ = done.send_blocking(outcome);
+    });
+
+    let tray: Rc<RefCell<Option<Tray>>> = Rc::new(RefCell::new(None));
+    let shown = Rc::clone(&tray);
+    let watch = gio::bus_watch_name(
+        gio::BusType::Session,
+        crate::APP_ID,
+        gio::BusNameWatcherFlags::NONE,
+        {
+            let tray = Rc::clone(&tray);
+            move |_, _, _| *tray.borrow_mut() = None
+        },
+        move |_, _| {
+            let group = Arc::clone(&group);
+            let made = Tray::new(
+                &title,
+                vec![
+                    Entry::Item("Open Divine".into()),
+                    Entry::Item(format!("Stop {title}")),
+                ],
+                open_window,
+                move |index| match index {
+                    0 => open_window(),
+                    _ => {
+                        let leader = group.load(Ordering::SeqCst);
+                        if leader != 0 {
+                            crate::legendary::stop(leader, false);
+                        }
+                    }
+                },
+            );
+            match made {
+                Ok(made) => *shown.borrow_mut() = Some(made),
+                Err(e) => warn!("no icon in the tray: {e:#}"),
+            }
+        },
+    );
+
+    let main_loop = glib::MainLoop::new(None, false);
+    let result = Rc::new(RefCell::new(None));
+    glib::spawn_future_local({
+        let main_loop = main_loop.clone();
+        let result = Rc::clone(&result);
+        async move {
+            *result.borrow_mut() = finished.recv().await.ok();
+            main_loop.quit();
+        }
+    });
+    main_loop.run();
+    gio::bus_unwatch_name(watch);
+    tray.borrow_mut().take();
+    result
+        .take()
+        .unwrap_or_else(|| Err(anyhow::anyhow!("the game's thread went away")))
+}
+
+/// Starts the window beside the game. Waited on from a thread of its own, so
+/// that it is not left behind as a zombie for as long as the game runs.
+fn open_window() {
+    let me = match std::env::current_exe() {
+        Ok(me) => me,
+        Err(e) => {
+            warn!("cannot find Divine's own binary: {e:#}");
+            return;
+        }
+    };
+    match Command::new(me).spawn() {
+        Ok(mut child) => {
+            thread::spawn(move || child.wait());
+        }
+        Err(e) => warn!("cannot open the window: {e:#}"),
     }
 }
 

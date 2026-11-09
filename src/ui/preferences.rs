@@ -377,6 +377,44 @@ pub fn show(app: &Rc<App>) {
         .build();
     shortcuts_group.add(&shortcuts);
 
+    let tray = switch(
+        app,
+        "Show Icon in the Tray",
+        "Also shown while a game started from a shortcut is running",
+        cfg.tray.enabled,
+        |cfg, on| cfg.tray.enabled = on,
+    );
+    let weak = Rc::downgrade(app);
+    tray.connect_active_notify(move |_| {
+        if let Some(app) = weak.upgrade() {
+            app.sync_tray();
+        }
+    });
+    let hide_on_close = switch(
+        app,
+        "Hide to the Tray When Closed",
+        "Closing the window leaves Divine running, downloads included",
+        cfg.tray.hide_on_close,
+        |cfg, on| cfg.tray.hide_on_close = on,
+    );
+    let hide_on_launch = switch(
+        app,
+        "Hide to the Tray While Playing",
+        "The window comes back once the game is over",
+        cfg.tray.hide_on_launch,
+        |cfg, on| cfg.tray.hide_on_launch = on,
+    );
+    // Without the icon there would be no way back to a hidden window.
+    for row in [&hide_on_close, &hide_on_launch] {
+        tray.bind_property("active", row, "sensitive")
+            .sync_create()
+            .build();
+    }
+    let tray_group = adw::PreferencesGroup::builder().title("Tray").build();
+    tray_group.add(&tray);
+    tray_group.add(&hide_on_close);
+    tray_group.add(&hide_on_launch);
+
     let paths_group = adw::PreferencesGroup::builder()
         .title("Paths")
         .description("Leave a field empty to restore its default")
@@ -396,6 +434,7 @@ pub fn show(app: &Rc<App>) {
     general.add(&proxy_group(app, &cfg));
     general.add(&tools_group);
     general.add(&shortcuts_group);
+    general.add(&tray_group);
     general.add(&paths_group);
 
     let dialog = adw::PreferencesDialog::new();

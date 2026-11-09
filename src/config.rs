@@ -485,6 +485,28 @@ impl Default for TrailerSettings {
     }
 }
 
+/// The icon in the system tray, and when the window goes there instead of
+/// closing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TraySettings {
+    pub enabled: bool,
+    /// Closing the window hides it, and Divine carries on in the tray.
+    pub hide_on_close: bool,
+    /// Starting a game hides the window until the game is over.
+    pub hide_on_launch: bool,
+}
+
+impl Default for TraySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hide_on_close: false,
+            hide_on_launch: false,
+        }
+    }
+}
+
 /// A proxy for everything Divine, legendary, umu and the games send; see
 /// src/proxy.rs.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -551,6 +573,7 @@ pub struct Config {
     pub downloads: DownloadSettings,
     pub trailers: TrailerSettings,
     pub proxy: ProxySettings,
+    pub tray: TraySettings,
     pub games: BTreeMap<String, GameSettings>,
 }
 
