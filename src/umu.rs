@@ -6,11 +6,17 @@
 //! Rockstar launcher tries to initialise the Steam API and dies with
 //! "Steam failed to initialize". Heroic resolves ids the same way.
 
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::http::{self, Memo};
+use crate::log::warn;
 
 const API: &str = "https://umu.openwinecomponents.org/umu_api.php";
 
@@ -48,17 +54,98 @@ pub fn steam_app_id(game_id: &str) -> Option<u32> {
 }
 
 /// Resolves an Epic app name to a umu game id, or `None` when the database has
-/// no entry for it. Blocking, and remembered for the session including misses.
+/// no entry for it. Blocking.
+///
+/// The answer is kept on disk, because the id is more than a lookup key: it
+/// picks the game's protonfixes and names its window, which the menu entry
+/// has to match. Asked afresh every run, an hour without the database would
+/// have the game start without its fixes and its window renamed. So an id,
+/// once found, is kept for good; a miss is asked again after a week, since the
+/// database grows; and a question that got no answer is never written down.
 pub fn game_id(app_name: &str) -> Option<String> {
     static MEMO: Memo<String, Option<String>> = OnceLock::new();
     http::remembered(&MEMO, app_name.to_lowercase(), |codename| {
-        let body = http::ask_with(API, &[("codename", codename), ("store", STORE)])?;
-        serde_json::from_str::<Vec<Entry>>(&body)
-            .ok()?
-            .into_iter()
-            .next()
-            .map(|entry| entry.umu_id)
+        resolve(&cache_file(), codename, now(), ask)
     })
+}
+
+/// How long the database's "no such game" is believed.
+const RECHECK_MISS: u64 = 7 * 24 * 60 * 60;
+
+/// What the database said about one game, and when.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Known {
+    id: Option<String>,
+    /// Seconds since the epoch.
+    asked: u64,
+}
+
+fn resolve(
+    file: &Path,
+    codename: &str,
+    now: u64,
+    ask: impl FnOnce(&str) -> Option<Option<String>>,
+) -> Option<String> {
+    let mut known = load(file);
+    if let Some(entry) = known.get(codename) {
+        if entry.id.is_some() || now.saturating_sub(entry.asked) < RECHECK_MISS {
+            return entry.id.clone();
+        }
+    }
+    let Some(answer) = ask(codename) else {
+        // No answer is not "no such game": whatever was known stands.
+        return known.get(codename).and_then(|entry| entry.id.clone());
+    };
+    known.insert(
+        codename.to_string(),
+        Known {
+            id: answer.clone(),
+            asked: now,
+        },
+    );
+    if let Err(e) = save(file, &known) {
+        warn!("cannot keep the umu ids: {e:#}");
+    }
+    answer
+}
+
+/// The database's answer: an id, or `Some(None)` when it has no entry. `None`
+/// when there was no answer to be had, which must not be taken for a miss.
+fn ask(codename: &str) -> Option<Option<String>> {
+    let body = http::ask_with(API, &[("codename", codename), ("store", STORE)])?;
+    // An unknown game comes back as an empty list.
+    let entries: Vec<Entry> = serde_json::from_str(&body).ok()?;
+    Some(entries.into_iter().next().map(|entry| entry.umu_id))
+}
+
+fn load(file: &Path) -> HashMap<String, Known> {
+    fs::read_to_string(file)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Through a temporary file: the window and a shortcut launch can both be
+/// writing, and either one reading half a file would forget every id.
+fn save(file: &Path, known: &HashMap<String, Known>) -> Result<()> {
+    if let Some(dir) = file.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let partial = file.with_extension(format!("{}.partial", std::process::id()));
+    fs::write(&partial, serde_json::to_string_pretty(known)?)
+        .with_context(|| format!("writing {}", partial.display()))?;
+    fs::rename(&partial, file).with_context(|| format!("writing {}", file.display()))
+}
+
+fn cache_file() -> PathBuf {
+    crate::config::cache_dir().join("umu-ids.json")
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
 }
 
 /// What umu is doing about Proton, as far as its own output says.
@@ -108,6 +195,86 @@ fn trim_ellipsis(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let file =
+                std::env::temp_dir().join(format!("divine-umu-{name}-{}.json", std::process::id()));
+            let _ = fs::remove_file(&file);
+            Scratch(file)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    /// The id GTA V Enhanced has in the database today.
+    fn gta(_: &str) -> Option<Option<String>> {
+        Some(Some("umu-3240220".into()))
+    }
+
+    fn offline(_: &str) -> Option<Option<String>> {
+        None
+    }
+
+    fn unknown(_: &str) -> Option<Option<String>> {
+        Some(None)
+    }
+
+    #[test]
+    fn an_id_once_found_survives_the_database_being_down() {
+        let cache = Scratch::new("down");
+        assert_eq!(
+            super::resolve(&cache.0, "gta", 0, gta).as_deref(),
+            Some("umu-3240220")
+        );
+        assert_eq!(
+            super::resolve(&cache.0, "gta", 365 * DAY, offline).as_deref(),
+            Some("umu-3240220")
+        );
+    }
+
+    #[test]
+    fn a_found_id_is_not_asked_for_again() {
+        let cache = Scratch::new("found");
+        super::resolve(&cache.0, "gta", 0, gta);
+        let asked = |_: &str| -> Option<Option<String>> { panic!("asked again") };
+        super::resolve(&cache.0, "gta", 30 * DAY, asked);
+    }
+
+    #[test]
+    fn no_answer_is_not_written_down_as_no_such_game() {
+        let cache = Scratch::new("offline");
+        assert_eq!(super::resolve(&cache.0, "gta", 0, offline), None);
+        // Back online the same session's next run asks, and finds it.
+        assert_eq!(
+            super::resolve(&cache.0, "gta", 1, gta).as_deref(),
+            Some("umu-3240220")
+        );
+    }
+
+    #[test]
+    fn a_miss_is_believed_for_a_week_then_asked_again() {
+        let cache = Scratch::new("miss");
+        assert_eq!(super::resolve(&cache.0, "fowl", 0, unknown), None);
+        let asked = |_: &str| -> Option<Option<String>> { panic!("asked too soon") };
+        assert_eq!(super::resolve(&cache.0, "fowl", 6 * DAY, asked), None);
+        // The database has learned the game since.
+        let learned = |_: &str| Some(Some("umu-641990".to_string()));
+        assert_eq!(
+            super::resolve(&cache.0, "fowl", 8 * DAY, learned).as_deref(),
+            Some("umu-641990")
+        );
+    }
     use super::Fetching;
 
     /// umu's own wording, from the calls in `umu_proton.py` that surround a
