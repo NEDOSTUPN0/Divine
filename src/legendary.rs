@@ -814,10 +814,13 @@ impl Legendary {
         }
         cmd.stdout(Stdio::inherit()).stderr(Stdio::piped());
         // umu's container has no idea about a TMPDIR pointing outside of it,
-        // which is what a nix develop shell hands us.
-        cmd.env_remove("TMPDIR");
-        cmd.env_remove("TMP");
-        cmd.env_remove("TEMP");
+        // which is what a nix develop shell hands us. Certificates the same:
+        // a host path the container lacks leaves Proton's own downloads, such
+        // as the DLSS upgrade, failing to verify any server at all, where the
+        // runtime's own store would have done.
+        for name in ["TMPDIR", "TMP", "TEMP", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            cmd.env_remove(name);
+        }
 
         let mut inherited: BTreeMap<String, String> = std::env::vars().collect();
         inherited.extend(env.iter().cloned());
