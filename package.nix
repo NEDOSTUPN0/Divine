@@ -17,7 +17,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "divine";
-  version = "1.1.0";
+  version = "1.2.0";
 
   src = lib.cleanSourceWith {
     src = ./.;
