@@ -15,6 +15,7 @@ use crate::ui::{spawn_bg, window::App, wrapping_list};
 use super::gamescope::gamescope_row;
 use super::launch::show_launch_command;
 use super::row;
+use super::upscalers::upscalers_row;
 
 /// Everything a row needs to write itself down: which game it belongs to, and
 /// a way back to the launcher holding the config.
@@ -412,6 +413,8 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         })
     };
 
+    let upscalers = upscalers_row(&dialog, &write);
+
     let launching = adw::PreferencesGroup::builder()
         .title("Launching")
         .description("Every setting here falls back to the global one unless changed")
@@ -426,6 +429,7 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         gamemode.upcast(),
         mangohud.upcast(),
         gamescope.upcast(),
+        upscalers.upcast(),
         fake_epic.upcast(),
         launch_options.upcast(),
     ] {

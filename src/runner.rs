@@ -552,6 +552,11 @@ pub fn build_launch(game: &Game, cfg: &Config) -> Result<(String, Vec<(String, S
     // Asked quietly: the wrappers above already warned if it is missing.
     let in_gamescope = gamescope::in_use(&per_game.gamescope);
     let mut env = tuning(cfg, &per_game, in_gamescope);
+    env.extend(crate::upscalers::env(
+        &per_game,
+        crate::gpu::detected(),
+        crate::nvidia::driver_major(),
+    ));
 
     // Anti-cheat runtimes are per game, and Proton reads them straight from the
     // environment. Downloading here covers a runtime that went missing after it

@@ -259,11 +259,139 @@ pub struct GameSettings {
     pub gamemode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mangohud: Option<bool>,
-    /// Extra environment for the game. This and the table below are kept
+    /// NVIDIA's Smooth Motion, a frame the driver makes up between every two
+    /// the game renders. See src/nvidia.rs.
+    pub smooth_motion: bool,
+    /// Extra environment for the game. This and the tables below are kept
     /// last: TOML wants tables after values.
     pub env: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Gamescope::is_default")]
     pub gamescope: Gamescope,
+    #[serde(skip_serializing_if = "Dlss::is_default")]
+    pub dlss: Dlss,
+    #[serde(skip_serializing_if = "Fsr::is_default")]
+    pub fsr: Fsr,
+    #[serde(skip_serializing_if = "Xess::is_default")]
+    pub xess: Xess,
+}
+
+/// AMD's upscaling for one game; see src/upscalers.rs. Versions are named as
+/// Proton's list names them, and empty leaves the pick to Proton.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Fsr {
+    /// FSR 4 in games that ship FSR 3.1, through AMD's driver library.
+    pub fsr4: bool,
+    pub fsr4_version: String,
+    /// AMD's machine learning frame generation, which comes with FSR 4.
+    pub ml_frame_generation: bool,
+    /// FSR 4's watermarks, one for upscaling and one for frame generation.
+    pub indicator: bool,
+    /// Newer FidelityFX SDK libraries in place of the game's FSR 3.1 ones.
+    pub sdk: bool,
+    pub sdk_version: String,
+}
+
+impl Fsr {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Intel's upscaling for one game: newer XeSS libraries in place of the
+/// game's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Xess {
+    pub upgrade: bool,
+    pub version: String,
+}
+
+impl Xess {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// What a game's DLSS is told to do instead of what it asks for; see
+/// src/nvidia.rs. Per game only, like gamescope: a preset is a choice about
+/// one game. `None` and zero leave a setting to the game.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dlss {
+    /// Newer DLSS libraries in place of the ones the game shipped with.
+    pub upgrade: bool,
+    /// The version to upgrade to, as Proton's list names it. Empty takes the
+    /// newest.
+    pub version: String,
+    /// A newer Streamline in place of the game's, for games whose own is too
+    /// old to take the frame generation overrides.
+    pub streamline: bool,
+    /// Empty takes the newest, as with `version`.
+    pub streamline_version: String,
+    /// The labels the driver draws in a corner while DLSS runs.
+    pub indicator: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sr_preset: Option<DlssPreset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sr_mode: Option<DlssMode>,
+    /// Render scale in percent, read only with [`DlssMode::Custom`].
+    pub sr_scale: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rr_preset: Option<DlssPreset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rr_mode: Option<DlssMode>,
+    pub rr_scale: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fg_preset: Option<DlssPreset>,
+    /// Frames shown per frame rendered, 2 to 6. Ignored while `fg_dynamic`.
+    pub fg_multiplier: u8,
+    /// Frame generation that picks its multiplier as it goes, to hold
+    /// `fg_target_fps`.
+    pub fg_dynamic: bool,
+    /// Zero lets the driver aim for the display's refresh rate.
+    pub fg_target_fps: u32,
+    /// The most a dynamic multiplier may reach, 2 to 6.
+    pub fg_dynamic_max: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nr_preset: Option<DlssPreset>,
+}
+
+impl Dlss {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A DLSS model, by the letter NVIDIA gives it. Which letters mean anything
+/// depends on the feature; see [`crate::nvidia`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DlssPreset {
+    /// Whatever the driver currently recommends.
+    Latest,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    J,
+    K,
+    L,
+    M,
+}
+
+/// How far below the output resolution DLSS renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DlssMode {
+    Dlaa,
+    Quality,
+    Balanced,
+    Performance,
+    UltraPerformance,
+    Custom,
 }
 
 /// Running a game inside gamescope; see src/gamescope.rs. Per game only, like
@@ -414,8 +542,12 @@ impl GameSettings {
             && self.override_username.is_empty()
             && !self.offline
             && !self.skip_update_check
+            && !self.smooth_motion
             && self.env.is_empty()
             && self.gamescope.is_default()
+            && self.dlss.is_default()
+            && self.fsr.is_default()
+            && self.xess.is_default()
             && [
                 self.use_umu,
                 self.wayland,

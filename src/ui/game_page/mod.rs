@@ -13,6 +13,7 @@ mod launch;
 mod maintenance;
 mod settings;
 mod store;
+mod upscalers;
 
 use std::rc::Rc;
 
