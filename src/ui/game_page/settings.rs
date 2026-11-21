@@ -227,13 +227,13 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
     });
 
     let language = write.entry(
-        "Preferred language",
+        "Preferred Language",
         &saved.language,
         "Two letter code, e.g. ru. Empty uses the system locale.",
         |settings, value| settings.language = value,
     );
     let umu_id = write.entry(
-        "umu game id",
+        "umu Game ID",
         &saved.umu_id,
         "Picks the protonfixes umu applies, e.g. umu-271590. Empty looks it up.",
         |settings, value| settings.umu_id = value,
@@ -262,13 +262,13 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         |settings, value| settings.env = parse_env(&value),
     );
     let override_username = write.entry(
-        "Name games see",
+        "Name Games See",
         &saved.override_username,
         "Empty follows the global setting",
         |settings, value| settings.override_username = value,
     );
     let override_exe = write.entry(
-        "Run a different executable",
+        "Run a Different Executable",
         &saved.override_exe,
         "Path inside the game folder. What to reach for when a game insists on \
          starting a launcher of its own.",
@@ -415,38 +415,38 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
 
     let upscalers = upscalers_row(&dialog, &write);
 
-    let launching = adw::PreferencesGroup::builder()
-        .title("Launching")
-        .description("Every setting here falls back to the global one unless changed")
-        .build();
-    for row in [
-        proton.upcast::<gtk::Widget>(),
-        use_umu.upcast(),
-        wayland.upcast(),
-        hdr.upcast(),
-        eos_overlay.upcast(),
-        cloud_saves.upcast(),
-        gamemode.upcast(),
-        mangohud.upcast(),
-        gamescope.upcast(),
-        upscalers.upcast(),
-        fake_epic.upcast(),
-        launch_options.upcast(),
-    ] {
-        launching.add(&row);
-    }
+    // The same four tabs as the global preferences, so an override sits where
+    // the setting it overrides does.
+    let general = page("General", "preferences-system-symbolic");
+    general.add(&group(
+        "Starting",
+        None,
+        &[
+            launch_options.upcast(),
+            override_exe.upcast(),
+            language.upcast(),
+            offline.upcast(),
+            skip_update_check.upcast(),
+        ],
+    ));
+    general.add(&group("", None, &[launch_command.upcast()]));
 
-    let sync = adw::PreferencesGroup::builder()
-        .title("Synchronisation")
-        .build();
-    for row in [
-        ntsync.upcast::<gtk::Widget>(),
-        fsync.upcast(),
-        esync.upcast(),
-    ] {
-        sync.add(&row);
-    }
-
+    let proton_page = page("Proton", "system-run-symbolic");
+    proton_page.add(&group(
+        "Runner",
+        Some("Every setting here falls back to the global one unless changed"),
+        &[
+            proton.upcast(),
+            use_umu.upcast(),
+            umu_id.upcast(),
+            env.upcast(),
+        ],
+    ));
+    proton_page.add(&group(
+        "Synchronisation",
+        None,
+        &[ntsync.upcast(), fsync.upcast(), esync.upcast()],
+    ));
     let anticheat = adw::PreferencesGroup::builder()
         .title("Anti-cheat")
         .description(
@@ -463,29 +463,39 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
             fix.as_ref().is_some_and(|fix| fix.runtime(runtime)),
         ));
     }
+    proton_page.add(&anticheat);
+    proton_page.add(&group(
+        "Compatibility",
+        None,
+        &[fake_epic.upcast(), core_fonts.upcast()],
+    ));
 
-    let advanced = adw::PreferencesGroup::builder().title("Advanced").build();
-    for row in [
-        core_fonts.upcast::<gtk::Widget>(),
-        language.upcast(),
-        umu_id.upcast(),
-        env.upcast(),
-        override_exe.upcast(),
-        override_username.upcast(),
-        offline.upcast(),
-        skip_update_check.upcast(),
-        launch_command.upcast(),
-    ] {
-        advanced.add(&row);
+    let graphics = page("Graphics", "video-display-symbolic");
+    graphics.add(&group(
+        "Display",
+        None,
+        &[wayland.upcast(), hdr.upcast(), gamescope.upcast()],
+    ));
+    graphics.add(&group(
+        "Performance",
+        None,
+        &[upscalers.upcast(), gamemode.upcast(), mangohud.upcast()],
+    ));
+
+    let epic = page("Epic", "avatar-default-symbolic");
+    epic.add(&group(
+        "",
+        None,
+        &[
+            override_username.upcast(),
+            cloud_saves.upcast(),
+            eos_overlay.upcast(),
+        ],
+    ));
+
+    for page in [&general, &proton_page, &graphics, &epic] {
+        dialog.add(page);
     }
-
-    let page = adw::PreferencesPage::new();
-    page.add(&launching);
-    page.add(&sync);
-    page.add(&anticheat);
-    page.add(&advanced);
-
-    dialog.add(&page);
     // Wine Wayland, gamescope and the umu id all decide what the game's window
     // is called, which the menu entries have to name.
     let weak = Rc::downgrade(app);
@@ -495,6 +505,24 @@ pub(super) fn settings_dialog(app: &Rc<App>, game: &Game) {
         }
     });
     dialog.present(Some(&app.window));
+}
+
+fn page(title: &str, icon: &str) -> adw::PreferencesPage {
+    adw::PreferencesPage::builder()
+        .title(title)
+        .icon_name(icon)
+        .build()
+}
+
+fn group(title: &str, description: Option<&str>, rows: &[gtk::Widget]) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title(title)
+        .description(description.unwrap_or_default())
+        .build();
+    for row in rows {
+        group.add(row);
+    }
+    group
 }
 
 const WAYLAND_SUBTITLE: &str = "Experimental. Needs a Proton build that supports it: GE-Proton \

@@ -224,27 +224,14 @@ pub fn show(app: &Rc<App>) {
         }
     });
 
-    let runner_group = adw::PreferencesGroup::builder()
-        .title("Proton")
-        .description("Which build runs the games, and how")
-        .build();
-    runner_group.add(&umu);
-    runner_group.add(&proton);
-    runner_group.add(&steam_protons);
-    runner_group.add(&wayland);
-    runner_group.add(&hdr);
-
-    let epic_group = adw::PreferencesGroup::builder()
-        .title("Epic Services")
-        .description("What Divine asks of Epic beyond downloading the games")
-        .build();
-    epic_group.add(&eos_overlay);
-    epic_group.add(&cloud_saves);
-    epic_group.add(&report_playtime);
-
-    let limited = adw::SwitchRow::builder()
+    let limited = adw::ExpanderRow::builder()
         .title("Limit Download Speed")
-        .active(cfg.downloads.limit > 0)
+        .subtitle(
+            "legendary has no bandwidth setting, so Divine runs its downloads \
+             through a local proxy and holds the ceiling there",
+        )
+        .show_enable_switch(true)
+        .enable_expansion(cfg.downloads.limit > 0)
         .build();
     let limit = adw::SpinRow::builder()
         .title("Ceiling")
@@ -258,12 +245,8 @@ pub fn show(app: &Rc<App>) {
             0.0,
         ))
         .digits(1)
-        .sensitive(cfg.downloads.limit > 0)
         .build();
-    limited
-        .bind_property("active", &limit, "sensitive")
-        .sync_create()
-        .build();
+    limited.add_row(&limit);
 
     // Both rows say the same thing between them, so they save the same way.
     let save_limit = {
@@ -274,7 +257,7 @@ pub fn show(app: &Rc<App>) {
             let Some(app) = weak.upgrade() else {
                 return;
             };
-            let kib = if limited.is_active() {
+            let kib = if limited.enables_expansion() {
                 (limit.value() * 1024.0).round() as u64
             } else {
                 0
@@ -286,22 +269,11 @@ pub fn show(app: &Rc<App>) {
         }
     };
     let on_toggle = save_limit.clone();
-    limited.connect_active_notify(move |_| on_toggle());
+    limited.connect_enable_expansion_notify(move |_| on_toggle());
     limit.connect_value_notify(move |_| save_limit());
 
-    let downloads_group = adw::PreferencesGroup::builder()
-        .title("Downloads")
-        .description(
-            "legendary has no bandwidth setting, so Divine runs its downloads \
-             through a local proxy and holds the ceiling there",
-        )
-        .build();
+    let downloads_group = adw::PreferencesGroup::builder().title("Downloads").build();
     downloads_group.add(&limited);
-    downloads_group.add(&limit);
-
-    let tools_group = adw::PreferencesGroup::builder().title("Tools").build();
-    tools_group.add(&gamemode);
-    tools_group.add(&mangohud);
 
     let defaults = Config::default();
     let install_dir = path_row(
@@ -415,38 +387,78 @@ pub fn show(app: &Rc<App>) {
     tray_group.add(&hide_on_close);
     tray_group.add(&hide_on_launch);
 
-    let paths_group = adw::PreferencesGroup::builder()
-        .title("Paths")
-        .description("Leave a field empty to restore its default")
-        .build();
-    paths_group.add(&install_dir);
-    paths_group.add(&discord_folders);
-    paths_group.add(&prefixes_dir);
+    // Wide enough for all five tabs to sit in the header, as a game's four do
+    // at the default width. A narrow window still moves them to the bottom.
+    let dialog = adw::PreferencesDialog::builder().content_width(760).build();
 
-    let general = adw::PreferencesPage::builder()
-        .title("General")
-        .icon_name("preferences-system-symbolic")
-        .build();
-    general.add(&runner_group);
-    general.add(&sync_group);
-    general.add(&epic_group);
+    // The same tabs as a game's own settings, which override these.
+    let general = page("General", "preferences-system-symbolic");
+    general.add(&group(
+        "Library",
+        Some("Leave a folder empty to restore its default"),
+        &[
+            install_dir.upcast(),
+            discord_folders.upcast(),
+            prefixes_dir.upcast(),
+        ],
+    ));
     general.add(&downloads_group);
-    general.add(&proxy_group(app, &cfg));
-    general.add(&tools_group);
     general.add(&shortcuts_group);
     general.add(&tray_group);
-    general.add(&paths_group);
 
-    let dialog = adw::PreferencesDialog::new();
-    dialog.add(&general);
-    dialog.add(&proton_page::page(app));
-    dialog.add(&advanced_page(
-        app,
-        &dialog,
-        &legendary_bin,
-        &umu_bin,
-        &username,
+    let proton_tab = page("Proton", "system-run-symbolic");
+    let builds = adw::ActionRow::builder()
+        .title("Manage Builds")
+        .subtitle("Install GE-Proton and Proton CachyOS, and remove old builds")
+        .activatable(true)
+        .build();
+    builds.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    {
+        let weak = Rc::downgrade(app);
+        let showing = dialog.clone();
+        builds.connect_activated(move |_| {
+            if let Some(app) = weak.upgrade() {
+                showing.push_subpage(&proton_page::subpage(&app));
+            }
+        });
+    }
+    proton_tab.add(&group(
+        "Runner",
+        Some("Which build runs the games, and how. A game can override any of it."),
+        &[
+            proton.upcast(),
+            builds.upcast(),
+            steam_protons.upcast(),
+            umu.upcast(),
+        ],
     ));
+    proton_tab.add(&sync_group);
+
+    let graphics = page("Graphics", "video-display-symbolic");
+    graphics.add(&group("Display", None, &[wayland.upcast(), hdr.upcast()]));
+    graphics.add(&group(
+        "Performance",
+        Some("Upscalers and gamescope are set per game, in its own settings"),
+        &[gamemode.upcast(), mangohud.upcast()],
+    ));
+
+    let epic = page("Epic", "avatar-default-symbolic");
+    epic.add(&group(
+        "Services",
+        Some("What Divine asks of Epic beyond downloading the games"),
+        &[
+            cloud_saves.upcast(),
+            eos_overlay.upcast(),
+            report_playtime.upcast(),
+        ],
+    ));
+    epic.add(&identity_group(&username));
+    epic.add(&proxy_group(app, &cfg));
+
+    for tab in [&general, &proton_tab, &graphics, &epic] {
+        dialog.add(tab);
+    }
+    dialog.add(&advanced_page(app, &dialog, &legendary_bin, &umu_bin));
     // Wine Wayland, gamescope and the umu id all decide what the game's window
     // is called, which the menu entries have to name.
     let weak = Rc::downgrade(app);
@@ -456,6 +468,41 @@ pub fn show(app: &Rc<App>) {
         }
     });
     dialog.present(Some(&app.window));
+}
+
+/// The name games are told in place of the Epic display name.
+fn identity_group(username: &adw::EntryRow) -> adw::PreferencesGroup {
+    let identity = adw::PreferencesGroup::builder()
+        .title("Identity")
+        .description(
+            "Some games put the Epic display name in their own interface, and this \
+             replaces it there. Nothing else changes: the account id and the login \
+             code stay real, so Epic and any anti-cheat still see the real name, and \
+             a game that asks Epic over the network rather than reading its launch \
+             arguments will not notice. Leave it empty to use the real one. A single \
+             game can override this in its own settings.",
+        )
+        .build();
+    identity.add(username);
+    identity
+}
+
+fn page(title: &str, icon: &str) -> adw::PreferencesPage {
+    adw::PreferencesPage::builder()
+        .title(title)
+        .icon_name(icon)
+        .build()
+}
+
+fn group(title: &str, description: Option<&str>, rows: &[gtk::Widget]) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title(title)
+        .description(description.unwrap_or_default())
+        .build();
+    for row in rows {
+        group.add(row);
+    }
+    group
 }
 
 /// Where everything goes out through, for a network that cannot reach Epic
@@ -598,7 +645,6 @@ fn advanced_page(
     dialog: &adw::PreferencesDialog,
     legendary_bin: &adw::EntryRow,
     umu_bin: &adw::EntryRow,
-    username: &adw::EntryRow,
 ) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title("Advanced")
@@ -616,20 +662,6 @@ fn advanced_page(
     programs.add(legendary_bin);
     programs.add(umu_bin);
     page.add(&programs);
-
-    let identity = adw::PreferencesGroup::builder()
-        .title("Identity")
-        .description(
-            "Some games put the Epic display name in their own interface, and this \
-             replaces it there. Nothing else changes: the account id and the login \
-             code stay real, so Epic and any anti-cheat still see the real name, and \
-             a game that asks Epic over the network rather than reading its launch \
-             arguments will not notice. Leave it empty to use the real one. A single \
-             game can override this in its own settings.",
-        )
-        .build();
-    identity.add(username);
-    page.add(&identity);
 
     let logs = adw::ActionRow::builder()
         .title("Logs")

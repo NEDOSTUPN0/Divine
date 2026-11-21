@@ -1,7 +1,7 @@
-//! The Upscalers subpage of a game's settings: DLSS, FSR, XeSS and Smooth
-//! Motion.
+//! The Upscalers subpage of a game's settings: Smooth Motion and XeSS on the
+//! page itself, DLSS and FSR on subpages of their own.
 //!
-//! Every group is shown on every machine, so a setting never vanishes without
+//! Everything is shown on every machine, so a setting never vanishes without
 //! a word; what the cards present cannot run is locked, and says why. What
 //! each row turns into is src/upscalers.rs and src/nvidia.rs.
 
@@ -32,131 +32,121 @@ const MODES: [(&str, Option<DlssMode>); 7] = [
 const NEEDS_RTX: &str = "Needs an NVIDIA RTX card";
 const NEEDS_RTX_40: &str = "Needs an NVIDIA RTX 40 series card or newer";
 
-/// The row in the Launching group that leads to the subpage.
+/// The row on the Graphics tab that leads to the subpage.
 pub(super) fn upscalers_row(dialog: &adw::PreferencesDialog, write: &Writer) -> adw::ActionRow {
-    let row = adw::ActionRow::builder()
-        .title("Upscalers")
-        .subtitle("DLSS, FSR, XeSS and Smooth Motion")
-        .activatable(true)
-        .build();
-    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-
+    let row = link_row("Upscalers", "DLSS, FSR, XeSS and Smooth Motion");
     let dialog = dialog.downgrade();
     let write = write.clone();
     row.connect_activated(move |_| {
         if let Some(dialog) = dialog.upgrade() {
-            dialog.push_subpage(&page(&write));
+            dialog.push_subpage(&page(&dialog, &write));
         }
     });
     row
 }
 
-/// Built when it is opened, so it always starts from what is saved.
-fn page(write: &Writer) -> adw::NavigationPage {
-    let saved = write.settings();
-    let gpus = gpu::detected();
-    let card = gpus.nvidia.as_ref();
-    let has = |feature: fn(&NvidiaCard) -> bool| card.is_some_and(feature);
-
-    let motion = smooth_motion_group(write, &saved, has(NvidiaCard::frame_generation));
-
-    let (dlss, fill_dlss) = dlss_group(write, &saved);
-    let super_resolution = feature_group(
-        write,
-        "Super Resolution",
-        SR_PRESETS,
-        "Preset K suits DLAA, Quality and Balanced, M Performance and L Ultra Performance.",
-        (
-            saved.dlss.sr_preset,
-            saved.dlss.sr_mode,
-            saved.dlss.sr_scale,
-        ),
-        Setters {
-            preset: |s, value| s.dlss.sr_preset = value,
-            mode: |s, value| s.dlss.sr_mode = value,
-            scale: |s, value| s.dlss.sr_scale = value,
-        },
-    );
-    let ray_reconstruction = feature_group(
-        write,
-        "Ray Reconstruction",
-        RR_PRESETS,
-        "Presets D and E are transformer models, E the newer.",
-        (
-            saved.dlss.rr_preset,
-            saved.dlss.rr_mode,
-            saved.dlss.rr_scale,
-        ),
-        Setters {
-            preset: |s, value| s.dlss.rr_preset = value,
-            mode: |s, value| s.dlss.rr_mode = value,
-            scale: |s, value| s.dlss.rr_scale = value,
-        },
-    );
-    let frame_generation =
-        frame_generation_group(write, &saved, has(NvidiaCard::multi_frame_generation));
-    let neural_rendering = adw::PreferencesGroup::builder()
-        .title("DLSS NR")
-        .description("For the games that ship nvngx_dlssnr.dll")
+fn link_row(title: &str, subtitle: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .activatable(true)
         .build();
-    neural_rendering.add(&preset_row(
-        write,
-        NR_PRESETS,
-        saved.dlss.nr_preset,
-        |s, value| s.dlss.nr_preset = value,
-    ));
+    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    row
+}
 
-    if !has(NvidiaCard::dlss) {
-        for group in [
-            &dlss,
-            &super_resolution,
-            &ray_reconstruction,
-            &neural_rendering,
-        ] {
-            unsupported(group, NEEDS_RTX);
-        }
-    }
-    if !has(NvidiaCard::frame_generation) {
-        unsupported(&frame_generation, NEEDS_RTX_40);
-    }
-
-    let (fsr4, fill_fsr4) = fsr4_group(write, &saved);
-    if !gpus.amd {
-        unsupported(&fsr4, "Needs an AMD Radeon card");
-    }
-    let (fidelityfx, fill_fidelityfx) = fidelityfx_group(write, &saved);
-    let (xess, fill_xess) = xess_group(write, &saved);
-
-    spawn_bg(crate::upscalers::versions, move |listed| {
-        if let Some(listed) = listed {
-            fill_dlss(listed.dlss, listed.streamline);
-            fill_fsr4(listed.fsr4);
-            fill_fidelityfx(listed.fidelityfx);
-            fill_xess(listed.xess);
+/// A row leading to a further subpage, built when it is opened.
+fn subpage_row(
+    dialog: &adw::PreferencesDialog,
+    write: &Writer,
+    title: &str,
+    subtitle: &str,
+    build: fn(&Writer) -> adw::NavigationPage,
+) -> adw::ActionRow {
+    let row = link_row(title, subtitle);
+    let dialog = dialog.downgrade();
+    let write = write.clone();
+    row.connect_activated(move |_| {
+        if let Some(dialog) = dialog.upgrade() {
+            dialog.push_subpage(&build(&write));
         }
     });
+    row
+}
 
+fn navigation_page(title: &str, groups: &[&adw::PreferencesGroup]) -> adw::NavigationPage {
     let content = adw::PreferencesPage::new();
-    for group in [
-        &motion,
-        &dlss,
-        &super_resolution,
-        &ray_reconstruction,
-        &frame_generation,
-        &neural_rendering,
-        &fsr4,
-        &fidelityfx,
-        &xess,
-    ] {
-        content.add(group);
+    for group in groups {
+        content.add(*group);
     }
     let view = adw::ToolbarView::builder().content(&content).build();
     view.add_top_bar(&adw::HeaderBar::new());
     adw::NavigationPage::builder()
-        .title("Upscalers")
+        .title(title)
         .child(&view)
         .build()
 }
+
+/// Built when it is opened, so it always starts from what is saved.
+fn page(dialog: &adw::PreferencesDialog, write: &Writer) -> adw::NavigationPage {
+    let saved = write.settings();
+    let card = gpu::detected().nvidia.as_ref();
+
+    let motion = smooth_motion_group(
+        write,
+        &saved,
+        card.is_some_and(NvidiaCard::frame_generation),
+    );
+
+    let dlss = subpage_row(
+        dialog,
+        write,
+        "DLSS",
+        "Presets, modes, frame generation and newer libraries",
+        dlss_page,
+    );
+    if !card.is_some_and(NvidiaCard::dlss) {
+        dlss.set_sensitive(false);
+        dlss.set_subtitle(NEEDS_RTX);
+    }
+    let fsr = subpage_row(
+        dialog,
+        write,
+        "FSR",
+        "FSR 4 and newer FidelityFX libraries",
+        fsr_page,
+    );
+    let (xess, fill_xess) = upgrade_row(
+        write,
+        "Upgrade XeSS",
+        "Loads newer XeSS libraries in place of the game's, frame generation \
+         included. Works on any card, fastest on Intel's own.",
+        saved.xess.upgrade,
+        |s, on| s.xess.upgrade = on,
+        ("XeSS Version", "Newest", &saved.xess.version, |s, v| {
+            s.xess.version = v
+        }),
+    );
+    spawn_bg(crate::upscalers::versions, move |listed| {
+        if let Some(listed) = listed {
+            fill_xess(listed.xess);
+        }
+    });
+
+    let upscalers = adw::PreferencesGroup::builder()
+        .title("Upscalers")
+        .description(UPGRADES_NEED)
+        .build();
+    upscalers.add(&dlss);
+    upscalers.add(&fsr);
+    upscalers.add(&xess);
+    navigation_page("Upscalers", &[&motion, &upscalers])
+}
+
+/// Newer libraries come from Proton, which loads them in place of the game's
+/// and leaves its files alone.
+const UPGRADES_NEED: &str = "Upgrades need GE-Proton or CachyOS, which download the newer \
+     libraries into the prefix on the next launch. The game's own files stay as they are.";
 
 /// Locks a group the cards present cannot use, keeping its values for a
 /// machine that can.
@@ -194,91 +184,215 @@ fn smooth_motion_group(
     group
 }
 
-/// The DLSS and Streamline upgrades and the indicator. The returned closure
-/// fills in the two version lists.
-fn dlss_group(
+/// What a version row needs: its title, what Proton's own pick is called,
+/// what is saved, and where it is kept.
+type VersionSpec<'a> = (
+    &'a str,
+    &'static str,
+    &'a str,
+    fn(&mut GameSettings, String),
+);
+
+/// An upgrade with its switch in the header and the version inside, the
+/// way GNOME's settings pair a switch with what it opens up. The returned
+/// closure fills in the versions once Proton's list has answered.
+fn upgrade_row(
     write: &Writer,
-    saved: &GameSettings,
-) -> (adw::PreferencesGroup, impl FnOnce(Vec<String>, Vec<String>)) {
-    let dlss = &saved.dlss;
-    let upgrade = write.switch(
-        "Upgrade DLSS",
-        "Loads newer DLSS libraries in place of the ones the game shipped with, \
-         without touching its files. Needs GE-Proton or CachyOS, which download \
-         them into the prefix on the next launch.",
-        dlss.upgrade,
-        |settings, on| settings.dlss.upgrade = on,
-    );
-    let (version, fill_dlss) =
-        version_row(write, "DLSS Version", "Newest", &dlss.version, |s, v| {
-            s.dlss.version = v
-        });
-    upgrade
-        .bind_property("active", &version, "sensitive")
-        .sync_create()
+    title: &str,
+    subtitle: &str,
+    on: bool,
+    set: fn(&mut GameSettings, bool),
+    (version_title, default, saved, set_version): VersionSpec,
+) -> (adw::ExpanderRow, impl FnOnce(Vec<String>)) {
+    let row = adw::ExpanderRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .show_enable_switch(true)
+        .enable_expansion(on)
         .build();
-    let streamline = write.switch(
+    {
+        let write = write.clone();
+        row.connect_enable_expansion_notify(move |row| {
+            let on = row.enables_expansion();
+            write.set(|settings| set(settings, on));
+        });
+    }
+    let (version, fill) = version_row(write, version_title, default, saved, set_version);
+    row.add_row(&version);
+    (row, fill)
+}
+
+fn dlss_page(write: &Writer) -> adw::NavigationPage {
+    let saved = write.settings();
+    let card = gpu::detected().nvidia.as_ref();
+    let dlss = &saved.dlss;
+
+    let (upgrade, fill_dlss) = upgrade_row(
+        write,
+        "Upgrade DLSS",
+        "Loads newer DLSS libraries in place of the ones the game shipped with",
+        dlss.upgrade,
+        |s, on| s.dlss.upgrade = on,
+        ("Version", "Newest", &dlss.version, |s, v| {
+            s.dlss.version = v
+        }),
+    );
+    let (streamline, fill_streamline) = upgrade_row(
+        write,
         "Upgrade Streamline",
         "Loads a newer Streamline, the NVIDIA SDK many games reach DLSS through. \
-         An old one ignores the frame generation overrides below. Goes with \
-         Upgrade DLSS, and needs a recent GE-Proton: 11-12 has it.",
+         An old one ignores the frame generation overrides. Goes with Upgrade DLSS, \
+         and needs a recent GE-Proton: 11-12 has it.",
         dlss.streamline,
-        |settings, on| settings.dlss.streamline = on,
+        |s, on| s.dlss.streamline = on,
+        ("Version", "Newest", &dlss.streamline_version, |s, v| {
+            s.dlss.streamline_version = v
+        }),
     );
-    let (streamline_version, fill_streamline) = version_row(
-        write,
-        "Streamline Version",
-        "Newest",
-        &dlss.streamline_version,
-        |s, v| s.dlss.streamline_version = v,
-    );
-    // Each switch keeps its position while locked, for when it is back.
-    let follow = {
-        let (upgrade, streamline, streamline_version) = (
-            upgrade.clone(),
-            streamline.clone(),
-            streamline_version.clone(),
-        );
-        move || {
-            streamline.set_sensitive(upgrade.is_active());
-            streamline_version.set_sensitive(upgrade.is_active() && streamline.is_active());
+    // Locked, the switch keeps its position for when DLSS is upgraded again.
+    upgrade
+        .bind_property("enable-expansion", &streamline, "sensitive")
+        .sync_create()
+        .build();
+    spawn_bg(crate::upscalers::versions, move |listed| {
+        if let Some(listed) = listed {
+            fill_dlss(listed.dlss);
+            fill_streamline(listed.streamline);
         }
-    };
-    follow();
-    let follow = Rc::new(follow);
-    for switch in [&upgrade, &streamline] {
-        let follow = follow.clone();
-        switch.connect_active_notify(move |_| follow());
-    }
+    });
     let indicator = write.switch(
         "Indicator",
         "Shows the DLSS version, preset and mode in a corner of the game",
         dlss.indicator,
         |settings, on| settings.dlss.indicator = on,
     );
-
-    let group = adw::PreferencesGroup::builder()
-        .title("DLSS")
+    let general = adw::PreferencesGroup::builder()
         .description(
             "Overrides what the game asks DLSS for, as the NVIDIA app does on \
              Windows. Only games with DLSS are affected, and DLSS still has to be \
              switched on in the game's own settings.",
         )
         .build();
-    for row in [
-        upgrade.upcast::<gtk::Widget>(),
-        version.upcast(),
-        streamline.upcast(),
-        streamline_version.upcast(),
-        indicator.upcast(),
-    ] {
-        group.add(&row);
+    general.add(&upgrade);
+    general.add(&streamline);
+    general.add(&indicator);
+
+    let super_resolution = feature_group(
+        write,
+        "Super Resolution",
+        SR_PRESETS,
+        "Preset K suits DLAA, Quality and Balanced, M Performance and L Ultra Performance.",
+        (dlss.sr_preset, dlss.sr_mode, dlss.sr_scale),
+        Setters {
+            preset: |s, value| s.dlss.sr_preset = value,
+            mode: |s, value| s.dlss.sr_mode = value,
+            scale: |s, value| s.dlss.sr_scale = value,
+        },
+    );
+    let ray_reconstruction = feature_group(
+        write,
+        "Ray Reconstruction",
+        RR_PRESETS,
+        "Presets D and E are transformer models, E the newer.",
+        (dlss.rr_preset, dlss.rr_mode, dlss.rr_scale),
+        Setters {
+            preset: |s, value| s.dlss.rr_preset = value,
+            mode: |s, value| s.dlss.rr_mode = value,
+            scale: |s, value| s.dlss.rr_scale = value,
+        },
+    );
+    let frame_generation = frame_generation_group(
+        write,
+        &saved,
+        card.is_some_and(NvidiaCard::multi_frame_generation),
+    );
+    if !card.is_some_and(NvidiaCard::frame_generation) {
+        unsupported(&frame_generation, NEEDS_RTX_40);
     }
-    let fill = move |dlss: Vec<String>, streamline: Vec<String>| {
-        fill_dlss(dlss);
-        fill_streamline(streamline);
-    };
-    (group, fill)
+    let neural_rendering = adw::PreferencesGroup::builder()
+        .title("DLSS NR")
+        .description("For the games that ship nvngx_dlssnr.dll")
+        .build();
+    neural_rendering.add(&preset_row(
+        write,
+        NR_PRESETS,
+        dlss.nr_preset,
+        |s, value| s.dlss.nr_preset = value,
+    ));
+
+    navigation_page(
+        "DLSS",
+        &[
+            &general,
+            &super_resolution,
+            &ray_reconstruction,
+            &frame_generation,
+            &neural_rendering,
+        ],
+    )
+}
+
+fn fsr_page(write: &Writer) -> adw::NavigationPage {
+    let saved = write.settings();
+    let fsr = &saved.fsr;
+
+    let (fsr4, fill_fsr4) = upgrade_row(
+        write,
+        "Upgrade to FSR 4",
+        "Runs FSR 4 in games that ship FSR 3.1, through AMD's driver library. \
+         Radeon RX 7000 series and newer.",
+        fsr.fsr4,
+        |s, on| s.fsr.fsr4 = on,
+        ("Version", "Newest", &fsr.fsr4_version, |s, v| {
+            s.fsr.fsr4_version = v
+        }),
+    );
+    fsr4.add_row(&write.switch(
+        "ML Frame Generation",
+        "AMD's machine learning frame generation in place of FSR's own",
+        fsr.ml_frame_generation,
+        |settings, on| settings.fsr.ml_frame_generation = on,
+    ));
+    fsr4.add_row(&write.switch(
+        "Indicator",
+        "Shows FSR's watermarks over the game, one for upscaling and one for \
+         frame generation",
+        fsr.indicator,
+        |settings, on| settings.fsr.indicator = on,
+    ));
+    let fsr4_group = adw::PreferencesGroup::builder().title("FSR 4").build();
+    fsr4_group.add(&fsr4);
+    if !gpu::detected().amd {
+        unsupported(&fsr4_group, "Needs an AMD Radeon card");
+    }
+
+    // Proton pins a version of its own here rather than taking the newest.
+    let (sdk, fill_sdk) = upgrade_row(
+        write,
+        "Upgrade FidelityFX SDK",
+        "Loads newer FSR 3.1 libraries in place of the game's",
+        fsr.sdk,
+        |s, on| s.fsr.sdk = on,
+        ("Version", "Proton's Choice", &fsr.sdk_version, |s, v| {
+            s.fsr.sdk_version = v
+        }),
+    );
+    let sdk_group = adw::PreferencesGroup::builder()
+        .title("FSR 3.1")
+        .description("Works on any card")
+        .build();
+    sdk_group.add(&sdk);
+
+    spawn_bg(crate::upscalers::versions, move |listed| {
+        if let Some(listed) = listed {
+            fill_fsr4(listed.fsr4);
+            fill_sdk(listed.fidelityfx);
+        }
+    });
+    let note = adw::PreferencesGroup::builder()
+        .description(UPGRADES_NEED)
+        .build();
+    navigation_page("FSR", &[&note, &fsr4_group, &sdk_group])
 }
 
 /// Where each of a feature's three settings is kept.
@@ -475,125 +589,6 @@ fn frame_generation_group(
         group.add(&ceiling);
     }
     group
-}
-
-/// FSR 4 through AMD's driver library, and what comes with it.
-fn fsr4_group(
-    write: &Writer,
-    saved: &GameSettings,
-) -> (adw::PreferencesGroup, impl FnOnce(Vec<String>)) {
-    let fsr = &saved.fsr;
-    let upgrade = write.switch(
-        "Upgrade to FSR 4",
-        "Runs FSR 4 in games that ship FSR 3.1, through AMD's driver library. \
-         Radeon RX 7000 series and newer. Needs GE-Proton or CachyOS.",
-        fsr.fsr4,
-        |settings, on| settings.fsr.fsr4 = on,
-    );
-    let (version, fill) = version_row(
-        write,
-        "FSR 4 Version",
-        "Newest",
-        &fsr.fsr4_version,
-        |s, v| s.fsr.fsr4_version = v,
-    );
-    let frame_generation = write.switch(
-        "ML Frame Generation",
-        "AMD's machine learning frame generation in place of FSR's own",
-        fsr.ml_frame_generation,
-        |settings, on| settings.fsr.ml_frame_generation = on,
-    );
-    let indicator = write.switch(
-        "Indicator",
-        "Shows FSR's watermarks over the game, one for upscaling and one for \
-         frame generation",
-        fsr.indicator,
-        |settings, on| settings.fsr.indicator = on,
-    );
-    for row in [
-        version.upcast_ref::<gtk::Widget>(),
-        frame_generation.upcast_ref(),
-        indicator.upcast_ref(),
-    ] {
-        upgrade
-            .bind_property("active", row, "sensitive")
-            .sync_create()
-            .build();
-    }
-
-    let group = adw::PreferencesGroup::builder().title("FSR 4").build();
-    for row in [
-        upgrade.upcast::<gtk::Widget>(),
-        version.upcast(),
-        frame_generation.upcast(),
-        indicator.upcast(),
-    ] {
-        group.add(&row);
-    }
-    (group, fill)
-}
-
-fn fidelityfx_group(
-    write: &Writer,
-    saved: &GameSettings,
-) -> (adw::PreferencesGroup, impl FnOnce(Vec<String>)) {
-    let upgrade = write.switch(
-        "Upgrade FidelityFX SDK",
-        "Loads newer FSR 3.1 libraries in place of the game's, without touching \
-         its files. Needs GE-Proton or CachyOS.",
-        saved.fsr.sdk,
-        |settings, on| settings.fsr.sdk = on,
-    );
-    // Proton pins a version of its own here rather than taking the newest.
-    let (version, fill) = version_row(
-        write,
-        "SDK Version",
-        "Proton's Choice",
-        &saved.fsr.sdk_version,
-        |s, v| s.fsr.sdk_version = v,
-    );
-    upgrade
-        .bind_property("active", &version, "sensitive")
-        .sync_create()
-        .build();
-    let group = adw::PreferencesGroup::builder()
-        .title("FSR 3.1")
-        .description("Works on any card")
-        .build();
-    group.add(&upgrade);
-    group.add(&version);
-    (group, fill)
-}
-
-fn xess_group(
-    write: &Writer,
-    saved: &GameSettings,
-) -> (adw::PreferencesGroup, impl FnOnce(Vec<String>)) {
-    let upgrade = write.switch(
-        "Upgrade XeSS",
-        "Loads newer XeSS libraries in place of the game's, frame generation \
-         included, without touching its files. Needs GE-Proton or CachyOS.",
-        saved.xess.upgrade,
-        |settings, on| settings.xess.upgrade = on,
-    );
-    let (version, fill) = version_row(
-        write,
-        "XeSS Version",
-        "Newest",
-        &saved.xess.version,
-        |s, v| s.xess.version = v,
-    );
-    upgrade
-        .bind_property("active", &version, "sensitive")
-        .sync_create()
-        .build();
-    let group = adw::PreferencesGroup::builder()
-        .title("XeSS")
-        .description("Works on any card, fastest on Intel's own")
-        .build();
-    group.add(&upgrade);
-    group.add(&version);
-    (group, fill)
 }
 
 fn preset_row(

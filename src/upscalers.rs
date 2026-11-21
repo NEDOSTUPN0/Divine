@@ -13,6 +13,8 @@
 //! to on for an environment key nobody sets (umu-protonfixes, upscalers.py),
 //! so Divine sets that one directly; Proton only fills in what is missing.
 
+use std::sync::Mutex;
+
 use serde::Deserialize;
 
 use crate::config::{Fsr, GameSettings, Xess};
@@ -128,9 +130,18 @@ pub struct Versions {
 }
 
 /// `None` when the list cannot be had, which leaves Proton's pick as the only
-/// choice. Blocking.
+/// choice. Blocking. An answer is kept for the session, since every page of
+/// upscaler settings asks; a failure is not, so going online helps.
 pub fn versions() -> Option<Versions> {
-    parse_versions(&crate::http::ask(MANIFEST)?)
+    static SEEN: Mutex<Option<Versions>> = Mutex::new(None);
+    if let Some(seen) = SEEN.lock().ok().and_then(|seen| seen.clone()) {
+        return Some(seen);
+    }
+    let versions = parse_versions(&crate::http::ask(MANIFEST)?)?;
+    if let Ok(mut seen) = SEEN.lock() {
+        *seen = Some(versions.clone());
+    }
+    Some(versions)
 }
 
 fn parse_versions(manifest: &str) -> Option<Versions> {

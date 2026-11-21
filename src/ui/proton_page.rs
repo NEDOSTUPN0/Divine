@@ -1,4 +1,4 @@
-//! Preferences page for managing Proton builds: what is installed, and what can
+//! Preferences subpage for managing Proton builds: what is installed, and what can
 //! be downloaded from GE-Proton and Proton CachyOS.
 
 use std::path::{Path, PathBuf};
@@ -12,7 +12,17 @@ use crate::models::human_size;
 use crate::proton::{self, Release, Source};
 use crate::ui::{accessible_label, spawn_bg, window::App};
 
-pub fn page(app: &Rc<App>) -> adw::PreferencesPage {
+/// The page as a subpage of the preferences, reached from the Proton tab.
+pub fn subpage(app: &Rc<App>) -> adw::NavigationPage {
+    let view = adw::ToolbarView::builder().content(&page(app)).build();
+    view.add_top_bar(&adw::HeaderBar::new());
+    adw::NavigationPage::builder()
+        .title("Proton Builds")
+        .child(&view)
+        .build()
+}
+
+fn page(app: &Rc<App>) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::builder()
         .title("Proton")
         .icon_name("application-x-executable-symbolic")
